@@ -6,7 +6,7 @@ Mirror your iPhone in a compact desktop window on Fedora and other Linux distrib
 | --- | --- | --- |
 | AirPlay | Wi-Fi from Control Center, with sound | Optional USB control through a signed WebDriverAgent runner |
 | AirPlay with an existing WebDriverAgent | Wi-Fi from Control Center, with sound | Wi-Fi while your explicitly selected WebDriverAgent is running |
-| Developer Wi-Fi viewer | Direct Wi-Fi with optional audio in the browser | Direct Wi-Fi with iOS 27+, Developer Mode, and a one-time on-device PIN confirmation |
+| Developer Wi-Fi viewer | Direct Wi-Fi in the desktop app | Direct Wi-Fi with iOS 27+, Developer Mode, and one-time pairing |
 
 The desktop AirPlay window includes rotation, a floating pin, adjustable sizing, remembered geometry where the desktop supports it, screenshots, mute, and a single running instance. Its design follows the upstream project's compact phone-shaped window. The separate developer Wi-Fi viewer uses iOS's developer display and input services. Apple’s [macOS iPhone Mirroring](https://support.apple.com/en-us/120421) uses its own Apple Account integration. AirPlay on Linux requires you to start Screen Mirroring on the iPhone, and pauses when the iPhone locks.
 
@@ -90,7 +90,7 @@ For one-time wireless developer pairing, the phone also needs TCP **7005** to re
 sudo firewall-cmd --zone="$ZONE" --add-rich-rule="rule family=ipv4 source address=$PHONE_IP port port=7005 protocol=tcp accept" --timeout=10m
 ```
 
-The web and VNC viewers listen on loopback. Connect to them on the same Linux computer.
+The desktop app uses a password-protected local connection for its Wi-Fi viewer. The optional web and VNC viewers also listen on loopback.
 
 ## Wireless control on iOS 27+
 
@@ -98,19 +98,14 @@ This is the path for scrolling and tapping over Wi-Fi with no cable attached dur
 
 1. On the iPhone, turn on **Settings → Privacy & Security → Developer Mode** and confirm after the restart.
 2. On the Linux computer, run `iphone-mirroring-control wireless-pair`. On the iPhone, open **Settings → Developer → Paired Macs**, select the Linux computer, and enter the six-digit code from the terminal. Keep both devices on the same trusted Wi-Fi.
-3. Run `iphone-mirroring-control wireless`. It checks and mounts the Developer Disk Image over the paired connection as needed. The first mount may need internet access for Apple’s signing service.
-4. Open [the local web viewer](http://127.0.0.1:8765/) after the server starts. Use the username and session password printed in the terminal.
-5. Click to tap, click and drag up to scroll a TikTok feed, or type into a focused field. The browser viewer shows its controls and keyboard shortcuts under **?**. Use `iphone-mirroring-control wireless --audio` to enable sound by default. Press **Ctrl+C** in the terminal to end the session.
+3. Open **iPhone Mirroring Linux** from your application menu and click **Connect over Wi-Fi**. The app reuses the existing pairing and mounts the Developer Disk Image as needed. The first mount may need internet access.
+4. Click to tap, drag to swipe, and use the mouse wheel to scroll. Click a text field before typing. **Ctrl+H** goes Home. Use the right-click menu or **Ctrl+U** to disconnect.
 
-If more than one pairing record exists, add `--device-id YOUR_PAIRED_ID` using the identifier printed by the pairing command. If the browser cannot decode the stream, try the native PyAV-backed VNC option with a client such as GNOME Connections or TigerVNC.
+If you already created the pairing over USB, you can go straight to step 3. Stop an existing browser or VNC session before switching to the desktop app. The desktop viewer is silent on Linux.
 
-```bash
-iphone-mirroring-control wireless --vnc
-# In a second terminal, if using TigerVNC:
-vncviewer 127.0.0.1::5901
-```
+To pick a device when there are several pairing records, launch the desktop app with `iphone-mirroring-linux --wireless --device-id YOUR_PAIRED_ID`. The command-line browser and VNC viewers are still available through `iphone-mirroring-control wireless` and `iphone-mirroring-control wireless --vnc`.
 
-Enter the password printed by the first command. In VNC, click to tap and drag to swipe. Right-click or use **Ctrl+H** for Home. This VNC mode is silent. Quit a foreground app using the camera or microphone before starting the developer viewer. Stop any active AirPlay session before switching viewers. The wireless feature is based on [pymobiledevice3’s developer viewer](https://doronz88.github.io/pymobiledevice3/master/guides/screen-mirroring/) and [PIN pairing](https://doronz88.github.io/pymobiledevice3/master/cli/remote/#pair-host).
+The Wi-Fi viewer uses [pymobiledevice3’s developer display and input services](https://doronz88.github.io/pymobiledevice3/master/guides/screen-mirroring/) and [PIN pairing](https://doronz88.github.io/pymobiledevice3/master/cli/remote/#pair-host).
 
 ## USB control and existing Wi-Fi WebDriverAgent
 
@@ -150,8 +145,9 @@ A USB-started XCTest runner usually ends when the underlying test connection clo
 | Right-click | Open the controls menu, including size presets, pin, receiver name, and log |
 | Ctrl+M | Mute or unmute AirPlay sound |
 | Ctrl+S | Save the current full-resolution frame as a PNG |
-| Ctrl+U | Toggle input control |
-| Ctrl+H, Ctrl+J | Home or App Switcher when control is ready |
+| Ctrl+U | Disconnect the Wi-Fi viewer or toggle USB input control |
+| Ctrl+H | Go Home when input control is ready |
+| Ctrl+J | Open App Switcher with USB control |
 | Ctrl+Up, Ctrl+Down | Change the iPhone volume when control is ready |
 | Ctrl+Q | Quit |
 
@@ -171,7 +167,7 @@ On Fedora GNOME, the desktop app uses XWayland when available for window positio
 - The desktop app announces an AirPlay receiver over mDNS with Zeroconf. RTSP negotiates a session with the iPhone after you choose it in Control Center.
 - The inherited AirPlay compatibility layer handles the sender's legacy pairing and stream key exchange. PyAV and FFmpeg decode H.264 video and AAC or ALAC audio. Qt presents video frames and PortAudio plays sound through the Linux audio stack.
 - The optional USB backend starts an authorized XCTest runner with pymobiledevice3. The desktop translates mouse and keyboard actions into WDA commands sent over a local USB forward or a manually specified endpoint.
-- The optional iOS 27+ viewer uses verified developer pairing, a Wi-Fi tunnel, the iPhone’s HEVC display stream, and input through its developer HID services. The web or VNC viewer binds to loopback and requires a new session password.
+- The optional iOS 27+ viewer uses verified developer pairing, a Wi-Fi tunnel, the iPhone’s HEVC display stream, and input through its developer HID services. The app embeds the stream in its Qt window using a password-protected loopback connection.
 - iPhone video and input stay between the device and your computer. Protected apps may show a black screen during mirroring.
 
 ## Development
@@ -182,6 +178,7 @@ source .venv/bin/activate
 python -m pip install -e '.[control]'
 python tests/test_fairplay.py
 python tests/test_wda.py
+python tests/test_desktop_wireless.py
 python tools/smoke_test.py
 ```
 

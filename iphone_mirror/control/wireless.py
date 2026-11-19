@@ -26,14 +26,27 @@ def port_number(value):
     return port
 
 
-def run_tool(args):
+def dependency_error():
     try:
         installed = tuple(int(v) for v in version("pymobiledevice3").split(".")[:2])
     except PackageNotFoundError:
-        print(MSG_NO_PMD3, file=sys.stderr)
-        return 1
+        return MSG_NO_PMD3
     if installed < MIN_VERSION:
-        print("Wireless control requires pymobiledevice3 11.61 or later. Rerun ./install.sh --usb.", file=sys.stderr)
+        return "Wireless control requires pymobiledevice3 11.61 or later. Rerun ./install.sh --control."
+    return None
+
+
+def remote_args(device_id):
+    args = ["--remotepairing"]
+    if device_id:
+        args.extend(("--udid", device_id))
+    return args
+
+
+def run_tool(args):
+    error = dependency_error()
+    if error:
+        print(error, file=sys.stderr)
         return 1
     env = dict(os.environ, PYTHONUNBUFFERED="1")
     try:
@@ -54,9 +67,7 @@ def pair(args):
 
 def viewer(args):
     port = args.port or (VNC_PORT if args.vnc else WEB_PORT)
-    remote = ["--remotepairing"]
-    if args.device_id:
-        remote.extend(("--udid", args.device_id))
+    remote = remote_args(args.device_id)
     result = run_tool(["mounter", "auto-mount", *remote])
     if result:
         return result

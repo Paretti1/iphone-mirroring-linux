@@ -34,10 +34,11 @@ from PySide6.QtGui import (
     QRadialGradient,
     QTransform,
 )
-from PySide6.QtWidgets import QApplication, QMenu, QMessageBox, QSystemTrayIcon, QToolTip, QWidget
+from PySide6.QtWidgets import QApplication, QMenu, QMessageBox, QPushButton, QSystemTrayIcon, QToolTip, QWidget
 
 from .config import APP_NAME, LOG_FILE
 from .control import ERROR, OFF, READY, STARTING
+from .desktop_wireless import DesktopWireless
 
 log = logging.getLogger(__name__)
 
@@ -58,6 +59,8 @@ HINT_S = 2.6  # how long a status hint stays in the top bar
 # scrolling send many small deltas, which are summed and applied at most every ZOOM_MS.
 ZOOM_PER_NOTCH = 1.06
 ZOOM_MS = 30
+GREEN, ORANGE, RED = "#30d158", "#ff9f0a", "#ff453a"
+
 
 class Bridge(QObject):
     """Carries callbacks from worker threads to the GUI thread (queued signals)."""
@@ -117,7 +120,7 @@ def key_text(event) -> str:
 
 
 class PhoneWindow(QWidget):
-    def __init__(self, settings, receiver_ref, controller=None):
+    def __init__(self, settings, receiver_ref, controller=None, wireless_device=None):
         super().__init__()
         self.settings = settings
         self.rx = receiver_ref  # set later by main
@@ -127,6 +130,8 @@ class PhoneWindow(QWidget):
         self.setWindowIcon(app_icon())
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setMouseTracking(True)
+        self.setFocusPolicy(Qt.StrongFocus)
+        self._wireless_touch = None
         self._apply_flags()
 
         self.image = None  # QImage of the current frame (device pixels)
@@ -165,6 +170,21 @@ class PhoneWindow(QWidget):
         self._type_timer = QTimer(self, singleShot=True, interval=TYPE_BATCH_MS, timeout=self._flush_type)
         self._effects = []  # touch feedback: dict(kind, a, b, t, life), positions as fractions
         self._anim = QTimer(self, interval=16, timeout=self._tick)
+
+        self.wireless = DesktopWireless(self)
+        self.wireless.frame.connect(self._display_frame)
+        self.wireless.state_changed.connect(self._on_wireless_state)
+        self.wireless_device = wireless_device
+        self.wireless_message = ""
+        self._wireless_motion_time = 0.0
+        self._wireless_button = QPushButton("Connect over Wi-Fi", self)
+        self._wireless_button.setCursor(Qt.PointingHandCursor)
+        self._wireless_button.setMinimumHeight(36)
+        self._wireless_button.setStyleSheet(
+            "QPushButton { color: white; background: #443975; border: 1px solid #8a77bf; border-radius: 11px;"
+            " padding: 6px; } QPushButton:hover { background: #594b92; }"
+        )
+        self._wireless_button.clicked.connect(self.connect_wireless)
 
         screen = QApplication.primaryScreen().availableGeometry()
         ph = int(settings.get("phone_height") or 0) or int(screen.height() * 0.72)
@@ -217,6 +237,7 @@ class PhoneWindow(QWidget):
             g.moveCenter(center)
             self.move(g.topLeft())
         self._update_target()
+        self._update_wireless_button()
         self.update()
 
     def _update_target(self):
@@ -241,6 +262,10 @@ class PhoneWindow(QWidget):
 
     # ------------------------------------------------------------ data from receiver / controller
     def on_frame(self, arr, src_w, src_h):
+        if not self.wireless.active:
+            self._display_frame(arr, src_w, src_h)
+
+    def _display_frame(self, arr, src_w, src_h):
         h, w = arr.shape[:2]
         self._array = arr
         self.image = QImage(arr.data, w, h, arr.strides[0], QImage.Format_RGB32)
@@ -254,6 +279,7 @@ class PhoneWindow(QWidget):
                 self._relayout()
         if self.state != "mirroring":
             self.state = "mirroring"
+            self._update_wireless_button()
         self._frames += 1
         now = time.time()
         if now - self._fps_t >= 1:
@@ -265,6 +291,9 @@ class PhoneWindow(QWidget):
         log.debug("ui event %s %s", event, info)
         if event == "listening":
             self.info = info
+        if self.wireless.active:
+            return
+        if event == "listening":
             if self.state in ("starting", "error"):
                 self.state = "waiting"
         elif event == "connecting":
@@ -292,7 +321,64 @@ class PhoneWindow(QWidget):
         elif event == "error":
             self.state = "error"
             self.info = dict(self.info, message=info.get("message", ""))
+        self._update_wireless_button()
         self.update()
+
+    def _update_wireless_button(self):
+        rect = self.phone_rect()
+        width = min(190, int(rect.width() - 18))
+        height = self._wireless_button.minimumHeight()
+        self._wireless_button.setGeometry(
+            round(rect.center().x() - width / 2), round(rect.top() + rect.height() * 0.77), width, height
+        )
+        self._wireless_button.setVisible(
+            not self.wireless.active and self.state not in ("connecting", "mirroring", "paused")
+        )
+
+    def connect_wireless(self):
+        if self.wireless.active:
+            return
+        if self.state in ("connecting", "mirroring", "paused"):
+            self._hint("Stop Screen Mirroring on the iPhone before switching to Wi-Fi control")
+            return
+        if self.ctrl is not None and self.ctrl.active:
+            self.ctrl.stop()
+        self.wireless.start(self.wireless_device)
+
+    def _on_wireless_state(self, state, message):
+        self.wireless_message = message
+        if state in (STARTING, OFF, ERROR):
+            self._wireless_touch = None
+            self._drop_tap()
+            self._cancel_gesture()
+            self._wheel_acc = 0.0
+            self.image = None
+            self._array = None
+            self.src_size = None
+            self.client = "iPhone" if state == STARTING else None
+            self.state = {STARTING: "wireless_connecting", OFF: "waiting", ERROR: "wireless_error"}[state]
+            if state != STARTING and abs(self.aspect - DEFAULT_ASPECT) > 0.01:
+                self.aspect = DEFAULT_ASPECT
+                self._relayout()
+        if self.rx is not None:
+            self.rx.set_muted(self.wireless.active or not self.settings["audio"])
+        if state == ERROR:
+            self._show_control_error(message)
+        if state == READY:
+            self.setFocus()
+        self._update_wireless_button()
+        self._flash_bar()
+        self.update()
+
+    def _wireless_pointer(self, pos, pressed):
+        point = to_fraction(self.phone_rect(), pos)
+        self._wireless_touch = point if pressed else None
+        self.wireless.touch(*point, pressed)
+
+    def _release_wireless_pointer(self):
+        if self._wireless_touch is not None:
+            self.wireless.touch(*self._wireless_touch, False)
+            self._wireless_touch = None
 
     def on_control(self, state, message):
         """Controller state change; connected through Bridge.control, so this runs on the GUI thread.
@@ -405,6 +491,10 @@ class PhoneWindow(QWidget):
             title, sub = "Starting...", "Preparing the AirPlay receiver"
         elif self.state == "connecting":
             title, sub = "Connecting...", f"{self.client or 'iPhone'} is starting Screen Mirroring"
+        elif self.state == "wireless_connecting":
+            title, sub = "Connecting over Wi-Fi…", self.wireless_message
+        elif self.state == "wireless_error":
+            title, sub = "Wi-Fi connection failed", "Keep the paired iPhone awake on the same network and retry."
         elif self.state == "decrypt_error":
             title = "Could not decrypt the video"
             sub = (
@@ -522,6 +612,10 @@ class PhoneWindow(QWidget):
         return None
 
     def _control_status(self) -> str:
+        if self.wireless.ready:
+            return "Wi-Fi control"
+        if self.wireless.active:
+            return "Connecting over Wi-Fi"
         st = self.control_state
         if self.ctrl is None or st == OFF:
             return ""
@@ -551,7 +645,7 @@ class PhoneWindow(QWidget):
         return self._bar_labels()[0]
 
     def _control_color(self) -> QColor:
-        st = self.control_state
+        st = self.wireless.state if self.wireless.active else self.control_state
         if st == READY:
             return QColor(GREEN)
         if st == STARTING:
@@ -592,7 +686,7 @@ class PhoneWindow(QWidget):
         white = QColor(255, 255, 255, 220)
         d = 4.5 * k
         c = btn["home"].center()
-        home_on = self.control_state == READY
+        home_on = self._control_ready()
         p.setPen(QPen(white if home_on else QColor(255, 255, 255, 110), 1.6))
         p.setBrush(Qt.NoBrush)
         p.drawEllipse(c, 5.6 * k, 5.6 * k)
@@ -651,7 +745,7 @@ class PhoneWindow(QWidget):
 
     # ------------------------------------------------------------ animation
     def _needs_anim(self):
-        return bool(self._effects) or (self.hover and self.control_state == STARTING)
+        return bool(self._effects) or (self.hover and (self.control_state == STARTING or self.wireless.state == STARTING))
 
     def _update_anim(self):
         if self._needs_anim() and not self._anim.isActive():
@@ -672,6 +766,8 @@ class PhoneWindow(QWidget):
 
     # ------------------------------------------------------------ iPhone control
     def _control_ready(self):
+        if self.wireless.active:
+            return self.wireless.ready
         return self.ctrl is not None and self.control_state == READY
 
     def _gestures_on(self):
@@ -679,7 +775,9 @@ class PhoneWindow(QWidget):
         return self._control_ready() and self.image is not None
 
     def _toggle_control(self):
-        if self.ctrl is None:
+        if self.wireless.active:
+            self.wireless.stop()
+        elif self.ctrl is None:
             self._hint("iPhone control is not available")
         elif self.ctrl.active:  # the controller's own state: the shown one may lag behind
             self.ctrl.stop()
@@ -688,6 +786,12 @@ class PhoneWindow(QWidget):
 
     def _phone(self, method, *args):
         """Send a command (home, app_switcher, button) to the iPhone, or explain why not."""
+        if self.wireless.active:
+            if not self.wireless.ready:
+                self._hint("Connecting over Wi-Fi…")
+            elif not self.wireless.phone_button(method, *args):
+                self._hint("Swipe up and hold to open App Switcher")
+            return
         if not self._control_ready():
             if self.ctrl is None:
                 self._hint("iPhone control is not available")
@@ -774,7 +878,10 @@ class PhoneWindow(QWidget):
 
     def _flush_wheel(self):
         n, self._wheel_acc = self._wheel_acc, 0.0
-        if abs(n) >= 0.05 and self._control_ready():
+        if abs(n) >= 0.05 and self.wireless.ready:
+            if self._wireless_touch is None:
+                self.wireless.scroll(*self._wheel_pos, n)
+        elif abs(n) >= 0.05 and self._control_ready():
             self._flush_tap()  # keep the order: a click made before the scroll goes first
             self.ctrl.scroll(self._wheel_pos[0], self._wheel_pos[1], n)
 
@@ -813,6 +920,11 @@ class PhoneWindow(QWidget):
             self.update()
 
     def event(self, e):
+        if e.type() == QEvent.WindowDeactivate:
+            self._release_wireless_pointer()
+        if e.type() == QEvent.KeyPress and e.key() == Qt.Key_Tab and self.wireless.ready:
+            if not e.modifiers() and self.wireless.key(e):
+                return True
         if e.type() == QEvent.ToolTip:
             name = self._button_at(QPointF(e.pos())) if self.hover else None
             if name:
@@ -825,6 +937,8 @@ class PhoneWindow(QWidget):
 
     def _button_tip(self, name):
         if name == "control":
+            if self.wireless.active:
+                return "Disconnect Wi-Fi control (Ctrl+U)"
             return {
                 READY: "iPhone control is on - click to turn it off (Ctrl+U)",
                 STARTING: "iPhone control is starting - click to cancel (Ctrl+U)",
@@ -843,7 +957,11 @@ class PhoneWindow(QWidget):
                 return
         alt = bool(e.modifiers() & Qt.AltModifier)
         if self._gestures_on() and not alt and self.phone_rect().contains(pos):
-            self._gesture_begin(pos)
+            if self.wireless.ready:
+                self.setFocus()
+                self._wireless_pointer(pos, True)
+            else:
+                self._gesture_begin(pos)
             return
         if self._native_wayland:
             window = self.windowHandle()
@@ -854,6 +972,12 @@ class PhoneWindow(QWidget):
 
     def mouseMoveEvent(self, e):
         pos = e.position()
+        if self._wireless_touch is not None:
+            now = time.monotonic()
+            if now - self._wireless_motion_time >= 0.015:
+                self._wireless_pointer(pos, True)
+                self._wireless_motion_time = now
+            return
         g = self._g
         if g is not None:
             g["pos"] = QPointF(pos)
@@ -876,6 +1000,9 @@ class PhoneWindow(QWidget):
     def mouseReleaseEvent(self, e):
         if e.button() != Qt.LeftButton:
             return
+        if self._wireless_touch is not None:
+            self._wireless_pointer(e.position(), False)
+            return
         if self._g is not None:
             self._gesture_end(e.position())
             return
@@ -891,6 +1018,9 @@ class PhoneWindow(QWidget):
             return  # the first click already pressed the button
         alt = bool(e.modifiers() & Qt.AltModifier)
         if self._gestures_on() and not alt and self.phone_rect().contains(pos):
+            if self.wireless.ready:
+                self._wireless_pointer(pos, True)
+                return
             # second press of a double-click. If the first click is still held back, both are
             # sent together as a double tap on release; if it already went out, this is a tap.
             double = self._tap_timer.isActive()
@@ -949,7 +1079,10 @@ class PhoneWindow(QWidget):
             else:
                 super().keyPressEvent(e)
             return
-        if self._control_ready():
+        if self.wireless.ready:
+            if not mods & (Qt.AltModifier | Qt.MetaModifier) and self.wireless.key(e):
+                return
+        elif self._control_ready():
             text = key_text(e)
             if text:
                 self._type(text)
@@ -957,13 +1090,18 @@ class PhoneWindow(QWidget):
         super().keyPressEvent(e)
 
     def contextMenuEvent(self, e):
+        self._release_wireless_pointer()
         self._cancel_gesture()
         m = QMenu(self)
         ready = self._control_ready()
+        if self.wireless.active:
+            m.addAction("Disconnect Wi-Fi", self.wireless.stop)
+        else:
+            m.addAction("Connect over Wi-Fi", self.connect_wireless)
         ctl = QAction(
             "Control iPhone (USB)\tCtrl+U", m, checkable=True, checked=self.control_state in (STARTING, READY)
         )
-        ctl.setEnabled(self.ctrl is not None)
+        ctl.setEnabled(self.ctrl is not None and not self.wireless.active)
         ctl.triggered.connect(self._toggle_control)
         m.addAction(ctl)
         for label, method, args in (
@@ -973,12 +1111,13 @@ class PhoneWindow(QWidget):
             ("Volume Down\tCtrl+Down", "button", ("volumeDown",)),
         ):
             a = m.addAction(label, lambda method=method, args=args: self._phone(method, *args))
-            a.setEnabled(ready)
+            a.setEnabled(ready and (method != "app_switcher" or not self.wireless.active))
         m.addSeparator()
         top = QAction("Always on Top", m, checkable=True, checked=self.settings.get("always_on_top", True))
         top.triggered.connect(lambda: self._button("pin"))
         m.addAction(top)
         snd = QAction("Sound\tCtrl+M", m, checkable=True, checked=not (self.rx and self.rx.muted))
+        snd.setEnabled(not self.wireless.active)
         snd.triggered.connect(self._toggle_mute)
         m.addAction(snd)
         size = m.addMenu("Size")
@@ -1030,7 +1169,9 @@ class PhoneWindow(QWidget):
             self.update()
 
     def _toggle_mute(self):
-        if self.rx:
+        if self.wireless.active:
+            self._hint("Wi-Fi viewer audio is unavailable on Linux")
+        elif self.rx:
             self.rx.set_muted(not self.rx.muted)
             self.settings["audio"] = not self.rx.muted
             self.settings.save()
@@ -1043,12 +1184,16 @@ class PhoneWindow(QWidget):
 
     def screenshot(self):
         frame = self.rx.decoder.last_frame if self.rx and self.state == "mirroring" else None
-        if frame is None:
+        wireless_frame = self.image if self.wireless.ready else None
+        if frame is None and wireless_frame is None:
             self._hint("Nothing to save yet")
             return
         try:
-            arr = frame.to_ndarray(format="bgra")
-            img = QImage(arr.data, arr.shape[1], arr.shape[0], arr.strides[0], QImage.Format_RGB32).copy()
+            if wireless_frame is not None:
+                img = wireless_frame.copy()
+            else:
+                arr = frame.to_ndarray(format="bgra")
+                img = QImage(arr.data, arr.shape[1], arr.shape[0], arr.strides[0], QImage.Format_RGB32).copy()
             pictures = QStandardPaths.writableLocation(QStandardPaths.PicturesLocation)
             folder = Path(pictures or Path.home() / "Pictures") / APP_NAME
             folder.mkdir(parents=True, exist_ok=True)

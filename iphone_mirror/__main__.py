@@ -55,6 +55,8 @@ def parse_args():
     )
     p.add_argument("--port", type=airplay_port, help=f"RTSP port (default {net.PORT}, or {LOCAL_PORT} with --local)")
     p.add_argument("--bind", type=IPv4Address, help="limit AirPlay to one local IPv4 address")
+    p.add_argument("--wireless", action="store_true", help="connect a paired iPhone over Wi-Fi at launch")
+    p.add_argument("--device-id", help="select a previously paired iPhone for Wi-Fi control")
     p.add_argument("--control", action="store_true", help="start iPhone control (USB / WebDriverAgent) at launch")
     p.add_argument("--wda-url", help="use an existing, trusted WebDriverAgent HTTP endpoint")
     p.add_argument("--grab", metavar="DIR", help="self-test: save a PNG of the window every 2 s")
@@ -118,7 +120,7 @@ def main():
     ctrl = Controller(
         on_state=lambda state, message: bridge.control.emit(state, message), wda_url=args.wda_url
     )
-    win = PhoneWindow(settings, None, ctrl)
+    win = PhoneWindow(settings, None, ctrl, wireless_device=args.device_id)
     rx = Receiver(
         settings,
         on_frame=lambda arr, w, h: bridge.frame.emit(arr, w, h),
@@ -141,7 +143,9 @@ def main():
     win.show()
     win._update_target()
     rx.start()
-    if args.control:
+    if args.wireless:
+        win.connect_wireless()
+    elif args.control:
         ctrl.start()
     if args.grab:
         grab_dir = Path(args.grab)
@@ -157,6 +161,7 @@ def main():
     if args.quit_after:
         QTimer.singleShot(int(args.quit_after * 1000), app.quit)
     code = app.exec()
+    win.wireless.shutdown()
     settings.save()
     try:
         bridge.control.disconnect(win.on_control)  # the window is going away
