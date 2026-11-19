@@ -1,8 +1,13 @@
 """Bonjour / mDNS advertisement of the receiver (_airplay._tcp and _raop._tcp)."""
 import logging
 import socket
+from ipaddress import IPv4Address
+
+import ifaddr
 
 from zeroconf import IPVersion, ServiceInfo, Zeroconf
+
+from . import net
 
 log = logging.getLogger(__name__)
 
@@ -62,19 +67,23 @@ def txt_bytes(txt: dict) -> bytes:
 
 
 def local_ipv4_addresses():
-    addrs = set()
-    try:
-        for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
-            addrs.add(info[4][0])
-    except socket.gaierror:
-        pass
-    try:  # address of the default route
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-            s.connect(("192.0.2.1", 9))
-            addrs.add(s.getsockname()[0])
-    except OSError:
-        pass
-    return sorted(a for a in addrs if not a.startswith(("127.", "169.254.")))
+    if net.BIND_HOST != "0.0.0.0":
+        return [net.BIND_HOST]
+    addresses = set()
+    for adapter in ifaddr.get_adapters():
+        for info in adapter.ips:
+            if not info.is_IPv4:
+                continue
+            address = IPv4Address(info.ip)
+            if not (address.is_loopback or address.is_link_local or address.is_unspecified):
+                addresses.add(address)
+    return [str(address) for address in sorted(addresses)]
+
+
+def validate_name(name):
+    # RAOP's instance name includes the hexadecimal receiver ID and an @ sign.
+    if not name or "\x00" in name or len(name.encode("utf-8")) > 50:
+        raise ValueError("Use a network name between 1 and 50 UTF-8 bytes.")
 
 
 class Advertiser:
@@ -89,9 +98,12 @@ class Advertiser:
     def start(self):
         self.addresses = local_ipv4_addresses()
         name = self.settings["name"]
+        validate_name(name)
+        if not self.addresses:
+            raise OSError("no non-loopback IPv4 network interface")
         host = socket.gethostname().split(".")[0] + ".local."
-        self.zc = Zeroconf(ip_version=IPVersion.V4Only)
-        self.infos = [
+        self.zc = Zeroconf(interfaces=self.addresses, ip_version=IPVersion.V4Only)
+        infos = [
             ServiceInfo(
                 "_airplay._tcp.local.",
                 f"{name}._airplay._tcp.local.",
@@ -109,8 +121,9 @@ class Advertiser:
                 parsed_addresses=self.addresses or None,
             ),
         ]
-        for info in self.infos:
+        for info in infos:
             self.zc.register_service(info, allow_name_change=True)
+            self.infos.append(info)
         log.info("advertised '%s' on %s port %d", name, ", ".join(self.addresses) or "?", self.port)
 
     def stop(self):
@@ -121,3 +134,4 @@ class Advertiser:
             finally:
                 self.zc.close()
                 self.zc = None
+                self.infos.clear()

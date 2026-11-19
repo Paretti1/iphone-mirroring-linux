@@ -1,7 +1,1 @@
-zeroconf
-cryptography
-av
-PySide6-Essentials
-numpy
-sounddevice
-pymobiledevice3>=11.50
+-e .

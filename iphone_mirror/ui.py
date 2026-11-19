@@ -10,8 +10,8 @@ then moved by dragging the top bar or with Alt+drag anywhere.
 """
 import logging
 import math
-import sys
 import time
+from pathlib import Path
 from uuid import uuid4
 
 from PySide6.QtCore import (
@@ -36,8 +36,6 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import QApplication, QMenu, QMessageBox, QSystemTrayIcon, QToolTip, QWidget
 
-from pathlib import Path
-
 from .config import APP_NAME, LOG_FILE
 from .control import ERROR, OFF, READY, STARTING
 
@@ -61,13 +59,6 @@ HINT_S = 2.6  # how long a status hint stays in the top bar
 ZOOM_PER_NOTCH = 1.06
 ZOOM_MS = 30
 
-# Windows virtual-key codes: shortcuts must also work with non-Latin keyboard layouts
-VK_H, VK_J, VK_M, VK_U = 0x48, 0x4A, 0x4D, 0x55
-VK_OEM_PLUS, VK_OEM_MINUS, VK_ADD, VK_SUBTRACT = 0xBB, 0xBD, 0x6B, 0x6D
-
-GREEN, ORANGE, RED = QColor("#30d158"), QColor("#ff9f0a"), QColor("#ff453a")
-
-
 class Bridge(QObject):
     """Carries callbacks from worker threads to the GUI thread (queued signals)."""
 
@@ -83,8 +74,8 @@ def app_icon(size: int = 64) -> QIcon:
     p.setRenderHint(QPainter.Antialiasing)
     p.scale(size / 64, size / 64)
     g = QLinearGradient(0, 0, 64, 64)
-    g.setColorAt(0, QColor("#5e5ce6"))
-    g.setColorAt(1, QColor("#bf5af2"))
+    g.setColorAt(0, QColor("#287da8"))
+    g.setColorAt(1, QColor("#64d5bc"))
     p.setBrush(g)
     p.setPen(QPen(QColor("#1c1c1e"), 3))
     p.drawRoundedRect(QRectF(16, 3, 32, 58), 9, 9)
@@ -114,7 +105,7 @@ def key_text(event) -> str:
     """Text a key press types on the iPhone: printable characters, '\\b' or '\\n' ('' = none)."""
     mods = event.modifiers()
     ctrl, alt = bool(mods & Qt.ControlModifier), bool(mods & Qt.AltModifier)
-    if ctrl != alt:  # Ctrl+key / Alt+key are shortcuts; Ctrl+Alt is AltGr on Windows (still typing)
+    if ctrl != alt:  # Ctrl+key / Alt+key are shortcuts; Ctrl+Alt can be AltGr
         return ""
     k = event.key()
     if k == Qt.Key_Backspace:
@@ -123,10 +114,6 @@ def key_text(event) -> str:
         return "\n"
     t = event.text()
     return t if t and all(c.isprintable() for c in t) else ""
-
-
-def is_key(event, keys, vks=()) -> bool:
-    return event.key() in keys or (sys.platform == "win32" and event.nativeVirtualKey() in vks)
 
 
 class PhoneWindow(QWidget):
@@ -439,7 +426,7 @@ class PhoneWindow(QWidget):
             p.drawText(
                 QRectF(rect.x(), rect.bottom() - rect.width() * 0.16, rect.width(), 20),
                 Qt.AlignHCenter,
-                "PC: " + ", ".join(addrs) + "  -  iPhone and PC must be on the same Wi-Fi",
+                "Linux: " + " · ".join(addrs),
             )
 
     def _paint_airplay_glyph(self, p, rect):
@@ -937,27 +924,27 @@ class PhoneWindow(QWidget):
         mods = e.modifiers()
         if (mods & Qt.ControlModifier) and not (mods & Qt.AltModifier):
             rep = e.isAutoRepeat()
-            if is_key(e, (Qt.Key_Plus, Qt.Key_Equal), (VK_OEM_PLUS, VK_ADD)):
+            if e.key() in (Qt.Key_Plus, Qt.Key_Equal):
                 self.set_phone_height(self.phone_h * 1.1)
-            elif is_key(e, (Qt.Key_Minus,), (VK_OEM_MINUS, VK_SUBTRACT)):
+            elif e.key() == Qt.Key_Minus:
                 self.set_phone_height(self.phone_h / 1.1)
-            elif is_key(e, (Qt.Key_Up,)):
+            elif e.key() == Qt.Key_Up:
                 self._phone("button", "volumeUp")
-            elif is_key(e, (Qt.Key_Down,)):
+            elif e.key() == Qt.Key_Down:
                 self._phone("button", "volumeDown")
             elif rep:
                 pass  # Home / App Switcher / toggles: once per key press
-            elif is_key(e, (Qt.Key_H,), (VK_H,)):
+            elif e.key() == Qt.Key_H:
                 self._phone("home")
-            elif is_key(e, (Qt.Key_J,), (VK_J,)):
+            elif e.key() == Qt.Key_J:
                 self._phone("app_switcher")
-            elif is_key(e, (Qt.Key_M,), (VK_M,)):
+            elif e.key() == Qt.Key_M:
                 self._toggle_mute()
-            elif is_key(e, (Qt.Key_U,), (VK_U,)):
+            elif e.key() == Qt.Key_U:
                 self._toggle_control()
-            elif is_key(e, (Qt.Key_S,)):
+            elif e.key() == Qt.Key_S:
                 self.screenshot()
-            elif is_key(e, (Qt.Key_Q,)):
+            elif e.key() == Qt.Key_Q:
                 QApplication.quit()
             else:
                 super().keyPressEvent(e)
@@ -1000,7 +987,7 @@ class PhoneWindow(QWidget):
             size.addAction(label, lambda k=k: self.set_phone_height(screen.height() * k))
         m.addSeparator()
         m.addAction("Save Screenshot\tCtrl+S", self.screenshot)
-        m.addAction("Rename PC...", self._rename)
+        m.addAction("Receiver Name…", self._rename)
         m.addAction("Open Log", self._open_log)
         m.addSeparator()
         m.addAction("Quit\tCtrl+Q", QApplication.quit)
@@ -1030,17 +1017,23 @@ class PhoneWindow(QWidget):
         from PySide6.QtWidgets import QInputDialog
 
         name, ok = QInputDialog.getText(
-            self, "PC Name", "Name of this PC in Screen Mirroring on the iPhone:", text=self.settings["name"]
+            self, "Receiver Name", "Name shown in Screen Mirroring on the iPhone:", text=self.settings["name"]
         )
         name = name.strip()
-        if ok and name and self.rx:
-            self.rx.rename(name)
+        if ok and self.rx:
+            try:
+                self.rx.rename(name)
+            except ValueError as e:
+                self._hint(str(e))
+                return
             self.info = dict(self.info, name=name)
             self.update()
 
     def _toggle_mute(self):
         if self.rx:
             self.rx.set_muted(not self.rx.muted)
+            self.settings["audio"] = not self.rx.muted
+            self.settings.save()
             self._hint("Sound off" if self.rx.muted else "Sound on")
 
     def _open_log(self):

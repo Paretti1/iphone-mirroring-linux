@@ -15,7 +15,7 @@ import sys
 from pathlib import Path
 
 from . import ERROR, OFF, READY, STARTING, Controller
-from . import usb
+from . import usb, wireless
 from .wda import WDA, WDAError, describe_error
 
 DEFAULT_URL = f"http://127.0.0.1:{usb.WDA_PORT}"
@@ -173,7 +173,7 @@ def cmd_doctor(args):
         return 0
     if any(wda_ok):
         say("Result: the USB setup has a problem (see [FAIL] above), but WebDriverAgent is reachable,")
-        say("                Use --wda-url to target a running endpoint explicitly.")
+        say("        Use --wda-url to target a running endpoint explicitly.")
     else:
         say("Result: fix the problem marked [FAIL] above, then run the doctor again.")
     return 1
@@ -303,10 +303,11 @@ def cmd_type(args):
 def build_parser():
     p = argparse.ArgumentParser(
         prog=MODULE,
-        description="Set up and test control of the iPhone (mouse and keyboard) over USB.",
+        description="Set up and test iPhone control over USB or Wi-Fi.",
     )
     p.add_argument("-v", "--verbose", action="store_true", help="show log messages")
     sub = p.add_subparsers(dest="cmd", required=True, metavar="COMMAND")
+    wireless.register(sub)
 
     s = sub.add_parser("doctor", help="check everything USB control needs")
     s.add_argument("--ip", help="also check WebDriverAgent over Wi-Fi at this iPhone address (IP[:PORT])")

@@ -335,18 +335,16 @@ class ControllerTests(unittest.TestCase):
     def setUp(self):
         self.mock = MockWDA()
         self.states = []
-        self.patches = [mock.patch.object(Controller, "_find_running", return_value=self.mock.url)]
-        for p in self.patches:
-            p.start()
         FakeUsb.instances, FakeUsb.error, FakeUsb.block = [], None, False
 
     def tearDown(self):
-        for p in reversed(self.patches):
-            p.stop()
         self.mock.close()
 
-    def controller(self):
-        ctrl = Controller(on_state=lambda s, m: self.states.append((s, m)))
+    def controller(self, *, use_wda=True):
+        ctrl = Controller(
+            on_state=lambda s, m: self.states.append((s, m)),
+            wda_url=self.mock.url if use_wda else None,
+        )
         self.addCleanup(ctrl.stop)
         return ctrl
 
@@ -492,15 +490,11 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(self.mock.sessions, 2)
 
     def test_usb_error_then_restart(self):
-        self.patches[0].stop()
-        self.patches = [
-            mock.patch.object(Controller, "_find_running", return_value=None),
-            mock.patch.object(control, "UsbSession", FakeUsb),
-        ]
-        for p in self.patches:
-            p.start()
+        patch = mock.patch.object(control, "UsbSession", FakeUsb)
+        patch.start()
+        self.addCleanup(patch.stop)
         FakeUsb.error = usb.UsbError("no phone here")
-        ctrl = self.controller()
+        ctrl = self.controller(use_wda=False)
         ctrl.start()
         self.wait_state(ctrl, ERROR)
         self.assertEqual(ctrl.message, "no phone here")
@@ -513,15 +507,11 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual([s for s, _ in self.states].count(ERROR), 2)
 
     def test_stop_during_usb_bring_up(self):
-        self.patches[0].stop()
-        self.patches = [
-            mock.patch.object(Controller, "_find_running", return_value=None),
-            mock.patch.object(control, "UsbSession", FakeUsb),
-        ]
-        for p in self.patches:
-            p.start()
+        patch = mock.patch.object(control, "UsbSession", FakeUsb)
+        patch.start()
+        self.addCleanup(patch.stop)
         FakeUsb.block = True
-        ctrl = self.controller()
+        ctrl = self.controller(use_wda=False)
         ctrl.start()
         self.assertTrue(wait_for(lambda: (STARTING, "fake bring-up") in self.states))
         first_thread = ctrl._thread
@@ -621,12 +611,11 @@ class UsbTests(unittest.TestCase):
                 self.download(data, dest)
             self.assertEqual(list(Path(tmp).iterdir()), [])
 
-    def test_children_never_use_pythonw(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            for name in ("python.exe", "pythonw.exe"):
-                (Path(tmp) / name).write_bytes(b"")
-            with mock.patch.object(sys, "executable", str(Path(tmp) / "pythonw.exe")):
-                self.assertEqual(usb._python(), str(Path(tmp) / "python.exe"))
+    def test_children_use_the_current_environment(self):
+        with mock.patch.object(usb.importlib.util, "find_spec", return_value=True), \
+                mock.patch.object(usb.subprocess, "Popen") as popen:
+            usb._popen(["usbmux", "list"])
+        self.assertEqual(popen.call_args.args[0], [sys.executable, "-m", "pymobiledevice3", "usbmux", "list"])
 
     def test_list_devices(self):
         with mock.patch.object(usb, "usbmuxd_reachable", return_value=False):
@@ -714,9 +703,10 @@ class UsbTests(unittest.TestCase):
             self.assertEqual([c[0] for c in calls], ["usbmux"] + (["amfi"] if dev_mode else []) + ["mounter", "apps"])
             self.assertIn(["mounter", "auto-mount", "--udid", "UDID1"], calls)
             runner = ["developer", "dvt", "xcuitest", "com.facebook.WebDriverAgentRunner.xctrunner", "--udid", "UDID1"]
+            transport = ["--userspace"] if userspace else ["--tunnel", "UDID1"] if version == "17.2" else []
             self.assertEqual(spawned, [
-                ("wda_runner", runner + (["--userspace"] if userspace else [])),
-                ("wda_forward", ["usbmux", "forward", "18100", "8100", "--udid", "UDID1"]),
+                ("wda_runner", runner + transport),
+                ("wda_forward", ["usbmux", "forward", "18100", "8100", "--host", "127.0.0.1", "--udid", "UDID1"]),
             ])
 
     def test_close_cancels_bring_up(self):
@@ -745,25 +735,6 @@ class UsbTests(unittest.TestCase):
         except Exception as e:
             return e
 
-    @unittest.skipUnless(sys.platform == "win32", "Windows job objects")
-    def test_children_are_tied_to_a_kill_on_close_job(self):
-        import ctypes
-        from ctypes import wintypes
-
-        p = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(10)"],
-                             creationflags=usb.NO_WINDOW)
-        try:
-            usb._tie_to_job(p)
-            self.assertIsNotNone(usb._job)
-            k32 = ctypes.WinDLL("kernel32")
-            k32.IsProcessInJob.argtypes = (wintypes.HANDLE, wintypes.HANDLE, ctypes.POINTER(wintypes.BOOL))
-            result = wintypes.BOOL()
-            self.assertTrue(k32.IsProcessInJob(int(p._handle), usb._job, ctypes.byref(result)))
-            self.assertTrue(result.value)
-        finally:
-            p.kill()
-            p.wait()
-
     @unittest.skipUnless(importlib.util.find_spec("pymobiledevice3"), "pymobiledevice3 not installed")
     def test_command_lines_match_installed_pymobiledevice3(self):
         """Every command we run must parse: pymobiledevice3 rejects unknown options (exit 2)
@@ -772,11 +743,15 @@ class UsbTests(unittest.TestCase):
         commands = calls + [args for _, args in spawned] + [
             ["usbmux", "list", "--usb", "--simple"],
             ["amfi", "reveal-developer-mode", "--udid", "UDID1"],
+            ["remote", "pair-host", "--port", "7005", "--timeout", "180"],
+            ["mounter", "auto-mount", "--remotepairing", "--udid", "UDID1"],
+            ["developer", "core-device", "display", "serve-web", "--bind", "127.0.0.1", "--no-audio", "--remotepairing"],
+            ["developer", "core-device", "display", "serve-vnc", "--bind", "127.0.0.1", "--decoder", "av", "--remotepairing"],
         ]
         procs = [
-            (args, subprocess.Popen([usb._python(), "-m", "pymobiledevice3", *args, "--help"],
+            (args, subprocess.Popen([sys.executable, "-m", "pymobiledevice3", *args, "--help"],
                                     stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
-                                    creationflags=usb.NO_WINDOW, env=usb._child_env()))
+                                    env=usb._child_env()))
             for args in commands
         ]
         for args, p in procs:
@@ -828,9 +803,8 @@ class CliTests(unittest.TestCase):
             if "Running." in text:
                 _thread.interrupt_main()  # like pressing Ctrl+C once control is ready
 
-        with mock.patch.object(Controller, "_find_running", return_value=self.mock.url), \
-                mock.patch.object(cli, "say", say):
-            code, out = self.run_cli("start")
+        with mock.patch.object(cli, "say", say):
+            code, out = self.run_cli("start", "--wda-url", self.mock.url)
         self.assertEqual(code, 0, out)
         self.assertIn("[OK]   Control ready (390x844 pt)", out)
         self.assertIn(f"WebDriverAgent: {self.mock.url}", out)
@@ -838,8 +812,7 @@ class CliTests(unittest.TestCase):
 
     def test_start_reports_errors(self):
         FakeUsb.instances, FakeUsb.error, FakeUsb.block = [], usb.UsbError(usb.MSG_NO_DEVICE), False
-        with mock.patch.object(Controller, "_find_running", return_value=None), \
-                mock.patch.object(control, "UsbSession", FakeUsb):
+        with mock.patch.object(control, "UsbSession", FakeUsb):
             code, out = self.run_cli("start")
         self.assertEqual(code, 1)
         self.assertIn("[FAIL] Control stopped", out)
@@ -852,8 +825,8 @@ class CliTests(unittest.TestCase):
             code, out = self.run_cli("doctor")
         self.assertEqual(code, 1)
         self.assertIn("[OK]   pymobiledevice3", out)
-        self.assertIn("[FAIL] Apple's USB service", out)
-        self.assertIn("Apple Devices", out)
+        self.assertIn("[FAIL] The system usbmuxd service", out)
+        self.assertIn("systemctl status usbmuxd", out)
         self.assertIn(f"[OK]   WebDriverAgent answers at {self.mock.url} (iPhone Wi-Fi address 10.0.0.2)", out)
 
     def test_doctor_all_good(self):

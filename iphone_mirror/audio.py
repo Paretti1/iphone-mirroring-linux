@@ -28,7 +28,7 @@ class Player:
     PREBUFFER = int(RATE * 0.08)
     MAX_BUFFER = int(RATE * 0.35)
 
-    def __init__(self):
+    def __init__(self, playback=True):
         self._chunks = collections.deque()
         self._buffered = 0
         self._lock = threading.Lock()
@@ -36,6 +36,8 @@ class Player:
         self.gain = 1.0
         self.muted = False
         self._stream = None
+        if not playback:
+            return
         try:
             import sounddevice as sd
 
@@ -96,10 +98,13 @@ class Player:
 
 
 class _Proto(asyncio.DatagramProtocol):
-    def __init__(self, handler):
+    def __init__(self, handler, remote_ip):
         self.handler = handler
+        self.remote_ip = remote_ip
 
     def datagram_received(self, data, addr):
+        if addr[0] != self.remote_ip:
+            return
         try:
             self.handler(data)
         except Exception:
@@ -107,10 +112,11 @@ class _Proto(asyncio.DatagramProtocol):
 
 
 class AudioStream:
-    def __init__(self, aeskey: bytes, aesiv: bytes, ct: int, player: Player):
+    def __init__(self, aeskey: bytes, aesiv: bytes, ct: int, player: Player, remote_ip):
         self.key, self.iv = aeskey, aesiv
         self.ct = ct
         self.player = player
+        self.remote_ip = remote_ip
         self.data_port = self.control_port = 0
         self._transports = []
         self._last_seq = None
@@ -128,9 +134,16 @@ class AudioStream:
 
     async def start(self):
         loop = asyncio.get_running_loop()
-        t1, _ = await loop.create_datagram_endpoint(lambda: _Proto(self._data), local_addr=(net.BIND_HOST, 0))
-        t2, _ = await loop.create_datagram_endpoint(lambda: _Proto(self._control), local_addr=(net.BIND_HOST, 0))
-        self._transports = [t1, t2]
+        t1, _ = await loop.create_datagram_endpoint(
+            lambda: _Proto(self._data, self.remote_ip),
+            local_addr=(net.BIND_HOST, net.PORT + net.AUDIO_DATA_OFFSET),
+        )
+        self._transports = [t1]
+        t2, _ = await loop.create_datagram_endpoint(
+            lambda: _Proto(self._control, self.remote_ip),
+            local_addr=(net.BIND_HOST, net.PORT + net.AUDIO_CONTROL_OFFSET),
+        )
+        self._transports.append(t2)
         self.data_port = t1.get_extra_info("sockname")[1]
         self.control_port = t2.get_extra_info("sockname")[1]
         return self.data_port, self.control_port

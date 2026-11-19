@@ -112,14 +112,18 @@ class VideoDecoder(threading.Thread):
         self.on_frame(img, frame.width, frame.height)
 
 
+MAX_VIDEO_PACKET = 16 * 1024 * 1024
+
+
 class MirrorStream:
     """Accepts the iPhone's mirror TCP connection and feeds the decoder."""
 
-    def __init__(self, aeskey: bytes, stream_connection_id: int, decoder: VideoDecoder, events):
+    def __init__(self, aeskey: bytes, stream_connection_id: int, decoder: VideoDecoder, events, remote_ip):
         self.decryptor = mirror_cipher(aeskey, stream_connection_id).decryptor()
         self.decoder = decoder
         self.events = events  # callable(event: str, **info)
         self.server = None
+        self.remote_ip = remote_ip
         self.port = 0
         self._sps_pps = None
         self._checked = False
@@ -128,22 +132,28 @@ class MirrorStream:
         self.frames = 0
 
     async def start(self) -> int:
-        self.server = await asyncio.start_server(self._handle, host=net.BIND_HOST, port=0)
+        self.server = await asyncio.start_server(self._handle, host=net.BIND_HOST, port=net.PORT + net.VIDEO_OFFSET)
         self.port = self.server.sockets[0].getsockname()[1]
         log.info("mirror data port %d", self.port)
         return self.port
 
     async def stop(self):
-        if self.server:
-            self.server.close()
-            self.server = None
+        server, self.server = self.server, None
+        if server:
+            server.close()
         if self._task:
-            self._task.cancel()
-            self._task = None
+            task, self._task = self._task, None
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        if server:
+            await server.wait_closed()
 
     async def _handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
-        self._task = asyncio.current_task()
         peer = writer.get_extra_info("peername")
+        if not peer or peer[0] != self.remote_ip or self._task is not None:
+            writer.close()
+            return
+        self._task = asyncio.current_task()
         log.info("mirror stream connected from %s", peer)
         sock = writer.get_extra_info("socket")
         try:
@@ -156,6 +166,8 @@ class MirrorStream:
             while True:
                 hdr = await reader.readexactly(128)
                 size = struct.unpack_from("<I", hdr, 0)[0]
+                if size > MAX_VIDEO_PACKET:
+                    raise ValueError("video packet exceeds the size limit")
                 payload = await reader.readexactly(size) if size else b""
                 self._packet(hdr, payload)
         except (asyncio.IncompleteReadError, ConnectionError):
@@ -166,7 +178,9 @@ class MirrorStream:
             log.exception("mirror stream error")
         finally:
             writer.close()
-            self.events("mirror_stopped")
+            if self._task is asyncio.current_task():
+                self._task = None
+                self.events("mirror_stopped")
 
     def _packet(self, hdr: bytes, payload: bytes):
         ptype = hdr[4]

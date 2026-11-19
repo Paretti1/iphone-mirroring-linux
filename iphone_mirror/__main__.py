@@ -2,8 +2,9 @@
 import argparse
 import logging
 import os
-import sys
 import signal
+import sys
+from ipaddress import IPv4Address
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
@@ -37,6 +38,13 @@ def setup_logging():
     logging.getLogger("zeroconf").setLevel(logging.WARNING)
 
 
+def airplay_port(value):
+    port = int(value)
+    if not 1024 <= port <= 65535 - net.AUDIO_CONTROL_OFFSET:
+        raise argparse.ArgumentTypeError("expected a port from 1024 to 65531")
+    return port
+
+
 def parse_args():
     p = argparse.ArgumentParser(prog="iphone-mirroring-linux")
     p.add_argument(
@@ -45,7 +53,8 @@ def parse_args():
         help=f"self-test: listen on 127.0.0.1:{LOCAL_PORT} only, no mDNS, no single-instance check, "
         f"separate settings file",
     )
-    p.add_argument("--port", type=int, help=f"RTSP port (default {net.PORT}, or {LOCAL_PORT} with --local)")
+    p.add_argument("--port", type=airplay_port, help=f"RTSP port (default {net.PORT}, or {LOCAL_PORT} with --local)")
+    p.add_argument("--bind", type=IPv4Address, help="limit AirPlay to one local IPv4 address")
     p.add_argument("--control", action="store_true", help="start iPhone control (USB / WebDriverAgent) at launch")
     p.add_argument("--wda-url", help="use an existing, trusted WebDriverAgent HTTP endpoint")
     p.add_argument("--grab", metavar="DIR", help="self-test: save a PNG of the window every 2 s")
@@ -59,9 +68,18 @@ def main():
         net.BIND_HOST = "127.0.0.1"
         net.ADVERTISE = False
         net.PORT = LOCAL_PORT
+    if args.bind is not None and not args.local:
+        net.BIND_HOST = str(args.bind)
     if args.port:
         net.PORT = args.port
     setup_logging()
+    if (
+        os.environ.get("XDG_SESSION_TYPE") == "wayland"
+        and "gnome" in os.environ.get("XDG_CURRENT_DESKTOP", "").lower()
+        and os.environ.get("DISPLAY")
+    ):
+        # GNOME's native Wayland windows cannot request always-on-top.
+        os.environ.setdefault("QT_QPA_PLATFORM", "xcb")
     app = QApplication(sys.argv[:1])
     app.setApplicationName(APP_NAME)
     app.setDesktopFileName(APP_ID)
@@ -107,8 +125,7 @@ def main():
         on_event=lambda e, info: bridge.event.emit(e, info),
     )
     win.rx = rx
-    if args.local:
-        rx.muted = True  # self-test: decode audio but keep the speakers silent
+    rx.muted = args.local or not settings["audio"]
     bridge.frame.connect(win.on_frame)
     bridge.event.connect(win.on_event)
     bridge.control.connect(win.on_control)

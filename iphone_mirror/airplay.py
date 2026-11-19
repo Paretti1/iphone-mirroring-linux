@@ -17,6 +17,7 @@ log = logging.getLogger(__name__)
 
 SERVER = f"AirTunes/{discovery.SRCVERS}"
 NTP_EPOCH = 2208988800
+MAX_RTSP_BODY = 1024 * 1024
 
 
 def _bplist(obj) -> bytes:
@@ -60,7 +61,7 @@ class TimingSender:
 
     async def start(self, remote_ip, remote_port):
         loop = asyncio.get_running_loop()
-        self.transport, _ = await loop.create_datagram_endpoint(_TimingProto, local_addr=(net.BIND_HOST, 0))
+        self.transport, _ = await loop.create_datagram_endpoint(_TimingProto, local_addr=(net.BIND_HOST, net.PORT + net.TIMING_OFFSET))
         self.port = self.transport.get_extra_info("sockname")[1]
         if remote_port:
             self.task = asyncio.create_task(self._loop((remote_ip, remote_port)))
@@ -112,14 +113,16 @@ class Connection:
                 await self._write(req, resp)
                 if resp.close:
                     break
-        except (asyncio.IncompleteReadError, ConnectionError):
+        except (asyncio.IncompleteReadError, asyncio.LimitOverrunError, ConnectionError, ValueError):
             pass
         except Exception:
             log.exception("connection error")
         finally:
-            await self.cleanup()
-            self.writer.close()
-            log.info("connection from %s closed", self.remote_ip)
+            try:
+                await self.cleanup()
+            finally:
+                self.writer.close()
+                log.info("connection from %s closed", self.remote_ip)
 
     async def _read_request(self):
         try:
@@ -137,6 +140,8 @@ class Connection:
                 k, v = line.split(":", 1)
                 headers[k.strip().lower()] = v.strip()
         n = int(headers.get("content-length", "0") or 0)
+        if not 0 <= n <= MAX_RTSP_BODY:
+            raise ValueError("invalid RTSP request body length")
         body = await self.reader.readexactly(n) if n else b""
         return Request(method, url, protocol, headers, body)
 
@@ -276,12 +281,21 @@ class Connection:
         plist = plistlib.loads(req.body) if req.body else {}
         out = {}
         if "ekey" in plist and "eiv" in plist:
-            self.client_name = plist.get("name") or "iPhone"
-            log.info("SETUP from %s (%s, %s)", self.client_name, plist.get("model"), plist.get("osVersion"))
-            rx.emit("connecting", name=self.client_name, ip=self.remote_ip, model=plist.get("model") or "",
-                    os=plist.get("osVersion") or "")
+            if rx.session_owner not in (None, self):
+                resp.status, resp.reason = 453, "Not Enough Bandwidth"
+                resp.close = True
+                return
             loop = asyncio.get_running_loop()
             aeskey = await loop.run_in_executor(None, self.fairplay.decrypt, plist["ekey"])
+            if rx.session_owner not in (None, self):
+                resp.status, resp.reason = 453, "Not Enough Bandwidth"
+                resp.close = True
+                return
+            rx.session_owner = self
+            self.client_name = plist.get("name") or "iPhone"
+            log.info("SETUP from %s (%s, %s)", self.client_name, plist.get("model"), plist.get("osVersion"))
+            rx.emit("connecting", name=self.client_name, model=plist.get("model") or "",
+                    os=plist.get("osVersion") or "")
             if self.pairing.ecdh_secret is not None:
                 aeskey = hashlib.sha512(aeskey + self.pairing.ecdh_secret).digest()[:16]
             self.aeskey, self.aesiv = aeskey, plist["eiv"]
@@ -300,10 +314,9 @@ class Connection:
                 stype = s.get("type")
                 if stype == 110:
                     sid = int(s.get("streamConnectionID", 0)) & 0xFFFFFFFFFFFFFFFF
-                    await rx.claim_mirror(self)
                     if self.mirror:
                         await self.mirror.stop()
-                    self.mirror = MirrorStream(self.aeskey, sid, rx.decoder, rx.emit)
+                    self.mirror = MirrorStream(self.aeskey, sid, rx.decoder, rx.emit, self.remote_ip)
                     port = await self.mirror.start()
                     res_streams.append({"dataPort": port, "type": 110})
                 elif stype == 96:
@@ -311,10 +324,7 @@ class Connection:
                         self.audio.stop()
                     ct = int(s.get("ct", 8))
                     player = rx.get_player()
-                    if player is None:
-                        res_streams.append({"dataPort": 0, "controlPort": 0, "type": 96})
-                        continue
-                    self.audio = AudioStream(self.aeskey, self.aesiv, ct, player)
+                    self.audio = AudioStream(self.aeskey, self.aesiv, ct, player, self.remote_ip)
                     dport, cport = await self.audio.start()
                     res_streams.append({"dataPort": dport, "controlPort": cport, "type": 96})
                 else:
@@ -328,7 +338,7 @@ class Connection:
 
     def on_set_parameter(self, req):
         ct = req.header("Content-Type") or ""
-        if ct == "text/parameters" and req.body.startswith(b"volume:"):
+        if self.rx.session_owner is self and ct == "text/parameters" and req.body.startswith(b"volume:"):
             try:
                 self.rx.set_volume(float(req.body.split(b":", 1)[1].strip()))
             except ValueError:
@@ -357,15 +367,14 @@ class Connection:
         if self.audio:
             self.audio.stop()
             self.audio = None
-        had_mirror = self.mirror is not None
         if self.mirror:
             await self.mirror.stop()
             self.mirror = None
         if self.timing:
             self.timing.stop()
             self.timing = None
-        self.rx.release_mirror(self)
-        if had_mirror:
+        if self.rx.session_owner is self:
+            self.rx.session_owner = None
             self.rx.emit("mirror_stopped")
 
 
@@ -384,7 +393,10 @@ class Receiver:
         self.loop = None
         self.port = 0
         self.advertiser = None
-        self._mirror_owner = None
+        self.session_owner = None
+        self._connections = set()
+        self._stop_requested = threading.Event()
+        self._stopping = None
         self._thread = None
         self._server = None
 
@@ -396,10 +408,8 @@ class Receiver:
 
     # ---------------------------------------------------------------- audio
     def get_player(self):
-        if not self.settings.get("audio", True):
-            return None
         if self.player is None:
-            self.player = Player()
+            self.player = Player(playback=net.ADVERTISE)
             self._apply_volume()
         return self.player
 
@@ -418,18 +428,6 @@ class Receiver:
         self.player.muted = self.muted or db <= -144
         self.player.gain = 0.0 if db <= -144 else max(0.0, min(1.0, 10 ** (db / 20.0)))
 
-    # ---------------------------------------------------------------- mirror ownership
-    async def claim_mirror(self, conn):
-        old = self._mirror_owner
-        self._mirror_owner = conn
-        if old is not None and old is not conn and old.mirror:
-            await old.mirror.stop()
-            old.mirror = None
-
-    def release_mirror(self, conn):
-        if self._mirror_owner is conn:
-            self._mirror_owner = None
-
     # ---------------------------------------------------------------- lifecycle
     def start(self):
         self.decoder.start()
@@ -437,68 +435,81 @@ class Receiver:
         self._thread.start()
 
     def _run(self):
-        self.loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(self.loop)
         try:
-            self.loop.run_until_complete(self._main())
-            self.loop.run_forever()
+            asyncio.run(self._main())
+        except OSError as e:
+            log.error("AirPlay listener failed: %s", e)
+            self.emit("error", message=f"Could not listen on TCP port {net.PORT}. See the log for details.")
         except Exception:
             log.exception("receiver crashed")
             self.emit("error", message="The AirPlay server crashed. See the log for details.")
 
+    async def _handle(self, reader, writer):
+        task = asyncio.current_task()
+        self._connections.add(task)
+        try:
+            await Connection(self, reader, writer).serve()
+        finally:
+            self._connections.discard(task)
+
     async def _main(self):
-        handler = lambda r, w: Connection(self, r, w).serve()  # noqa: E731
+        self.loop = asyncio.get_running_loop()
+        self._stopping = asyncio.Event()
         try:
-            self._server = await asyncio.start_server(handler, host=net.BIND_HOST, port=net.PORT)
-        except OSError:
-            self._server = await asyncio.start_server(handler, host=net.BIND_HOST, port=0)
-        self.port = self._server.sockets[0].getsockname()[1]
-        log.info("RTSP server listening on port %d", self.port)
-        if not net.ADVERTISE:
-            self.emit("listening", name=self.settings["name"], addresses=[net.BIND_HOST], port=self.port)
-            return
-        self.advertiser = discovery.Advertiser(self.settings, self.pk_hex, self.port)
-        try:
-            await self.loop.run_in_executor(None, self.advertiser.start)
-        except Exception:
-            log.exception("mDNS advertisement failed")
-            self.emit("error", message="Could not announce this PC on the network (mDNS).")
-            return
-        self.emit("listening", name=self.settings["name"], addresses=self.advertiser.addresses, port=self.port)
+            self._server = await asyncio.start_server(self._handle, host=net.BIND_HOST, port=net.PORT)
+            self.port = self._server.sockets[0].getsockname()[1]
+            log.info("RTSP server listening on port %d", self.port)
+            if net.ADVERTISE:
+                self.advertiser = discovery.Advertiser(self.settings, self.pk_hex, self.port)
+                self._advertisement_lock = asyncio.Lock()
+                await self._announce()
+            else:
+                self.emit("listening", name=self.settings["name"], addresses=[net.BIND_HOST], port=self.port)
+            if not self._stop_requested.is_set():
+                await self._stopping.wait()
+        finally:
+            if self._server is not None:
+                self._server.close()
+            connections = list(self._connections)
+            for task in connections:
+                task.cancel()
+            await asyncio.gather(*connections, return_exceptions=True)
+            if self._server is not None:
+                await self._server.wait_closed()
+            if self.advertiser is not None:
+                async with self._advertisement_lock:
+                    await asyncio.to_thread(self.advertiser.stop)
+            if self.player is not None:
+                self.player.close()
+
+    async def _announce(self):
+        async with self._advertisement_lock:
+            if self._stop_requested.is_set():
+                return
+            try:
+                await asyncio.to_thread(self.advertiser.stop)
+                await asyncio.to_thread(self.advertiser.start)
+                self.emit(
+                    "listening", name=self.settings["name"], addresses=self.advertiser.addresses, port=self.port
+                )
+            except Exception:
+                log.exception("mDNS advertisement failed")
+                self.emit("error", message="Could not announce this computer on the network (mDNS).")
 
     def rename(self, name: str):
         """Change the name shown on the iPhone and re-announce the receiver."""
+        discovery.validate_name(name)
         self.settings["name"] = name
         self.settings.save()
-        if not self.loop or not self.advertiser:
-            return
-
-        def reannounce():
-            try:
-                self.advertiser.stop()
-                self.advertiser.start()
-                self.emit("listening", name=name, addresses=self.advertiser.addresses, port=self.port)
-            except Exception:
-                log.exception("re-announce failed")
-
-        self.loop.call_soon_threadsafe(lambda: self.loop.run_in_executor(None, reannounce))
+        if self.loop and self.loop.is_running() and self.advertiser:
+            self.loop.call_soon_threadsafe(lambda: asyncio.create_task(self._announce()))
 
     def stop(self):
-        logging.getLogger("asyncio").setLevel(logging.CRITICAL)  # pending accept tasks at exit are harmless
-        if self.advertiser:
-            try:
-                self.advertiser.stop()
-            except Exception:
-                pass
-        if self.player:
-            self.player.close()
+        self._stop_requested.set()
+        if self.loop and self.loop.is_running() and self._stopping is not None:
+            self.loop.call_soon_threadsafe(self._stopping.set)
+        if self._thread:
+            self._thread.join(timeout=5)
+            if self._thread.is_alive():
+                log.warning("AirPlay receiver shutdown timed out")
         self.decoder.stop()
-        if self.loop and self.loop.is_running():
-            async def shutdown():
-                if self._server:
-                    self._server.close()
-                self.loop.stop()
-
-            asyncio.run_coroutine_threadsafe(shutdown(), self.loop)
-            if self._thread:
-                self._thread.join(timeout=2)
