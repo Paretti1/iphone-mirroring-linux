@@ -50,7 +50,7 @@ For wired control, install `usbmuxd`. For VNC, install `tigervnc`.
 
 ### Download and launch
 
-Clone while authenticated to GitHub with an account that has access to this private repository. You can also use **Code → Download ZIP**, then extract the source and run the same installer.
+You can clone or download this public repository without a GitHub account. To clone it, run the following commands after installing the packages for your distribution.
 
 ```bash
 git clone https://github.com/Paretti1/iphone-mirroring-linux.git
@@ -58,7 +58,9 @@ cd iphone-mirroring-linux
 ./install.sh --control
 ```
 
-Use `./install.sh` for AirPlay mirroring alone. `--control` and `--usb` both install the optional dependencies for Wi-Fi and USB input. Run `git pull` and rerun the installer for updates. If Python package wheels are unavailable for your distribution’s default interpreter, select an installed Python 3.12 or 3.13, for example `PYTHON=python3.12 ./install.sh --control`. Run the commands by full path under `~/.local/bin` if your shell does not include that directory.
+For a ZIP download, choose **Code → Download ZIP** or [download the ZIP directly](https://github.com/Paretti1/iphone-mirroring-linux/archive/refs/heads/main.zip). Extract the ZIP, open a terminal in the extracted folder, and run `./install.sh --control`.
+
+Use `./install.sh` for AirPlay mirroring alone. `--control` and `--usb` both install the optional dependencies for Wi-Fi and USB input. To update a Git clone, run `git pull` and rerun the installer. For a ZIP installation, download and extract a fresh copy, then rerun the installer from that folder. If Python package wheels are unavailable for your distribution’s default interpreter, select an installed Python 3.12 or 3.13, for example `PYTHON=python3.12 ./install.sh --control`. Run the commands by full path under `~/.local/bin` if your shell does not include that directory.
 
 ## AirPlay quick start
 
