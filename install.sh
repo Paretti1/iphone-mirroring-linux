@@ -2,9 +2,9 @@
 set -euo pipefail
 
 usage() {
-    printf '%s\n' 'Usage: ./install.sh [--usb]' \
+    printf '%s\n' 'Usage: ./install.sh [--control]' \
         'Install the desktop app for the current user.' \
-        'Include optional Wi-Fi and USB control with --usb.' \
+        'Include optional Wi-Fi and USB control with --control (or --usb).' \
         'Set PYTHON=/path/to/python3.12 to choose another Python.'
 }
 

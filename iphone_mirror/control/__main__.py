@@ -45,10 +45,6 @@ def fail(msg, advice=None):
     _block("[FAIL]", msg, advice)
 
 
-def warn(msg, advice=None):
-    _block("[WARN]", msg, advice)
-
-
 def note(msg, advice=None):
     _block("[--]", msg, advice)
 
@@ -159,7 +155,7 @@ def _check_wda(url):
 
 
 def cmd_doctor(args):
-    say("iPhone Mirror: checking USB control")
+    say("iPhone Mirroring Linux: checking USB control")
     say()
     usb_ok = _check_usb()
     urls = [DEFAULT_URL]

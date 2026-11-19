@@ -106,8 +106,8 @@ def main():
         instance = QLocalServer()
         instance.setSocketOptions(QLocalServer.UserAccessOption)
         if not instance.listen(endpoint):
-            logging.error("could not open the local application socket: %s", instance.errorString())
-            return 1
+            logging.warning("window activation socket unavailable: %s", instance.errorString())
+            instance = None
 
     settings = Settings(LOCAL_SETTINGS if args.local else SETTINGS_FILE)
     logging.info(
@@ -167,6 +167,7 @@ def main():
     rx.stop()
     if instance is not None:
         instance.close()
+    if instance_lock is not None:
         instance_lock.unlock()
     logging.info("exit")
     return code

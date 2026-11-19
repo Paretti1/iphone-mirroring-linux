@@ -793,6 +793,27 @@ class CliTests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("[FAIL]", out)
 
+    def test_wireless_viewer_requires_a_paired_device_and_local_password(self):
+        with mock.patch.object(cli.wireless, "run_tool", return_value=0) as run:
+            code, out = self.run_cli("wireless", "--device-id", "DEVICE1", "--vnc")
+        self.assertEqual(code, 0, out)
+        first, second = [call.args[0] for call in run.call_args_list]
+        remote = ["--remotepairing", "--udid", "DEVICE1"]
+        self.assertEqual(first, ["mounter", "auto-mount", *remote])
+        self.assertEqual(second[:8], ["developer", "core-device", "display", "serve-vnc",
+                                     "--port", "5901", "--decoder", "av"])
+        self.assertEqual(second[8:11], ["--bind", "127.0.0.1", "--password"])
+        self.assertRegex(second[11], r"^[0-9a-f]{8}$")
+        self.assertIn(second[11], out)
+        self.assertEqual(second[12:], remote)
+
+    def test_wireless_viewer_does_not_start_when_mount_fails(self):
+        with mock.patch.object(cli.wireless, "run_tool", return_value=1) as run:
+            code, out = self.run_cli("wireless")
+        self.assertEqual(code, 1, out)
+        self.assertNotIn("password", out)
+        run.assert_called_once_with(["mounter", "auto-mount", "--remotepairing"])
+
     def test_start_runs_until_ctrl_c(self):
         import _thread
 

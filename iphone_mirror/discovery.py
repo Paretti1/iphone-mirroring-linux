@@ -69,15 +69,30 @@ def txt_bytes(txt: dict) -> bytes:
 def local_ipv4_addresses():
     if net.BIND_HOST != "0.0.0.0":
         return [net.BIND_HOST]
-    addresses = set()
-    for adapter in ifaddr.get_adapters():
-        for info in adapter.ips:
-            if not info.is_IPv4:
-                continue
-            address = IPv4Address(info.ip)
-            if not (address.is_loopback or address.is_link_local or address.is_unspecified):
-                addresses.add(address)
-    return [str(address) for address in sorted(addresses)]
+    try:
+        adapters = ifaddr.get_adapters()
+    except OSError as e:
+        log.debug("could not list local network interfaces: %s", e)
+        adapters = []
+    addresses = {
+        IPv4Address(info.ip)
+        for adapter in adapters
+        for info in adapter.ips
+        if info.is_IPv4
+    }
+    if not addresses:
+        try:
+            # UDP connect picks the outbound interface without sending a packet.
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+                sock.connect(("192.0.2.1", 9))
+                addresses.add(IPv4Address(sock.getsockname()[0]))
+        except OSError as e:
+            log.debug("could not determine a default network interface: %s", e)
+    return [
+        str(address)
+        for address in sorted(addresses)
+        if not (address.is_loopback or address.is_link_local or address.is_unspecified)
+    ]
 
 
 def validate_name(name):

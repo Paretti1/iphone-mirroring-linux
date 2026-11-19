@@ -38,7 +38,7 @@ def main(data_home):
         f"Exec={desktop_exec(launcher)}\n"
         f"Icon={APP_ID}\n"
         "Terminal=false\n"
-        "Categories=AudioVideo;Utility;\n"
+        "Categories=AudioVideo;\n"
         f"StartupWMClass={APP_ID}\n",
         encoding="utf-8",
     )

@@ -9,6 +9,7 @@ venv/
 # Build output
 build/
 dist/
+*.egg-info/
 
 # Logs
 *.log

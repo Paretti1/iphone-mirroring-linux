@@ -69,7 +69,8 @@ class Settings:
                 log.warning("settings.json unreadable (%s), using defaults", e)
         changed = False
         if not self.data.get("name"):
-            self.data["name"] = socket.gethostname() or APP_NAME
+            hostname = socket.gethostname().encode("utf-8")[:50].decode("utf-8", "ignore").strip()
+            self.data["name"] = hostname or APP_NAME
             changed = True
         if not self.data.get("mac"):
             mac = bytearray(secrets.token_bytes(6))
