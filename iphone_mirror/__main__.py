@@ -143,8 +143,8 @@ def main():
     win.show()
     win._update_target()
     rx.start()
-    if args.wireless:
-        win.connect_wireless()
+    if args.wireless or (not args.local and not args.control and settings.get("wireless_auto_connect")):
+        QTimer.singleShot(0, win.connect_wireless)
     elif args.control:
         ctrl.start()
     if args.grab:

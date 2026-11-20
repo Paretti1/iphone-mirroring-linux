@@ -59,6 +59,8 @@ def run_tool(args):
 
 
 def pair(args):
+    if args.usb:
+        return run_tool(["lockdown", "remotepairing", "--pair"])
     options = ["remote", "pair-host", "--port", str(args.port), "--timeout", "180"]
     if args.name:
         options.extend(("--name", args.name))
@@ -89,6 +91,7 @@ def viewer(args):
 
 def register(subparsers):
     pair_parser = subparsers.add_parser("wireless-pair", help="pair over Wi-Fi using the iPhone's PIN prompt (iOS 27+)")
+    pair_parser.add_argument("--usb", action="store_true", help="save wireless pairing over a trusted USB connection once")
     pair_parser.add_argument("--name", help="name shown in Paired Macs (default: computer hostname)")
     pair_parser.add_argument("--port", type=port_number, default=PAIR_PORT, help=f"pairing port (default: {PAIR_PORT})")
     pair_parser.set_defaults(func=pair)

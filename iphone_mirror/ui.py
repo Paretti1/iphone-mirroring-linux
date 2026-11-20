@@ -34,7 +34,7 @@ from PySide6.QtGui import (
     QRadialGradient,
     QTransform,
 )
-from PySide6.QtWidgets import QApplication, QMenu, QMessageBox, QPushButton, QSystemTrayIcon, QToolTip, QWidget
+from PySide6.QtWidgets import QApplication, QHBoxLayout, QLabel, QMenu, QMessageBox, QPushButton, QSystemTrayIcon, QToolButton, QVBoxLayout, QToolTip, QWidget
 
 from .config import APP_NAME, LOG_FILE
 from .control import ERROR, OFF, READY, STARTING
@@ -43,7 +43,7 @@ from .desktop_wireless import DesktopWireless
 log = logging.getLogger(__name__)
 
 SHADOW = 22  # px around the phone for the drop shadow
-BAR = 40  # px above the phone for the hover bar
+BAR = 78  # px above the phone for the hover bar
 DEFAULT_ASPECT = 1179 / 2556  # iPhone portrait
 
 # input mapping when iPhone control is on
@@ -59,7 +59,6 @@ HINT_S = 2.6  # how long a status hint stays in the top bar
 # scrolling send many small deltas, which are summed and applied at most every ZOOM_MS.
 ZOOM_PER_NOTCH = 1.06
 ZOOM_MS = 30
-GREEN, ORANGE, RED = "#30d158", "#ff9f0a", "#ff453a"
 
 
 class Bridge(QObject):
@@ -174,7 +173,7 @@ class PhoneWindow(QWidget):
         self.wireless = DesktopWireless(self)
         self.wireless.frame.connect(self._display_frame)
         self.wireless.state_changed.connect(self._on_wireless_state)
-        self.wireless_device = wireless_device
+        self.wireless_device = wireless_device or settings.get("wireless_device")
         self.wireless_message = ""
         self._wireless_motion_time = 0.0
         self._wireless_button = QPushButton("Connect over Wi-Fi", self)
@@ -185,6 +184,36 @@ class PhoneWindow(QWidget):
             " padding: 6px; } QPushButton:hover { background: #594b92; }"
         )
         self._wireless_button.clicked.connect(self.connect_wireless)
+
+        self._toolbar = QWidget(self)
+        self._toolbar.setObjectName("toolbar")
+        self._toolbar.setStyleSheet(
+            "QWidget#toolbar { background: #202024; border: 1px solid #45454b; border-radius: 12px; }"
+            "QLabel { color: #e6e6ec; background: transparent; }"
+            "QToolButton { color: #eeeeef; background: transparent; border: 0; border-radius: 6px; padding: 4px; }"
+            "QToolButton:hover { background: #424248; }"
+            "QToolButton:disabled { color: #77777e; }"
+            "QToolButton:checked { background: #375647; }"
+        )
+        layout = QVBoxLayout(self._toolbar)
+        layout.setContentsMargins(8, 4, 8, 4)
+        layout.setSpacing(0)
+        self._status_label = QLabel("iPhone")
+        self._status_label.setAttribute(Qt.WA_TransparentForMouseEvents)
+        layout.addWidget(self._status_label)
+        row = QHBoxLayout()
+        row.setSpacing(4)
+        self._toolbar_buttons = {}
+        for name, label in (("control", "Control"), ("home", "Home"), ("pin", "Pin"), ("min", "−"), ("close", "×")):
+            button = QToolButton(self._toolbar)
+            button.setText(label)
+            button.setMinimumSize(32, 30)
+            button.setFocusPolicy(Qt.NoFocus)
+            button.setCheckable(name in ("control", "pin"))
+            button.clicked.connect(lambda checked=False, name=name: self._button(name))
+            row.addWidget(button, 1)
+            self._toolbar_buttons[name] = button
+        layout.addLayout(row)
 
         screen = QApplication.primaryScreen().availableGeometry()
         ph = int(settings.get("phone_height") or 0) or int(screen.height() * 0.72)
@@ -222,7 +251,7 @@ class PhoneWindow(QWidget):
 
     def phone_rect(self) -> QRectF:
         w, h = self.phone_size()
-        return QRectF(SHADOW, SHADOW + BAR, w, h)
+        return QRectF((self.width() - w) / 2, SHADOW + BAR, w, h)
 
     def corner_radius(self) -> float:
         w, h = self.phone_size()
@@ -231,7 +260,8 @@ class PhoneWindow(QWidget):
     def _relayout(self, keep_center=True):
         w, h = self.phone_size()
         center = self.geometry().center()
-        self.setFixedSize(w + 2 * SHADOW, h + 2 * SHADOW + BAR)
+        self.setFixedSize(max(300, w + 2 * SHADOW), h + 2 * SHADOW + BAR)
+        self._toolbar.setGeometry(SHADOW, SHADOW, self.width() - 2 * SHADOW, BAR - 8)
         if keep_center and not self._native_wayland:
             g = self.geometry()
             g.moveCenter(center)
@@ -249,7 +279,10 @@ class PhoneWindow(QWidget):
 
     def set_phone_height(self, h):
         screen = (self.screen() or QApplication.primaryScreen()).availableGeometry()
-        self.phone_h = int(max(320, min(h, screen.height() + 400)))
+        vertical = screen.height() - BAR - 2 * SHADOW
+        horizontal = screen.width() - 2 * SHADOW
+        limit = min(vertical, horizontal / self.aspect) if self.aspect <= 1 else min(horizontal, vertical * self.aspect)
+        self.phone_h = int(max(160, min(h, limit)))
         self._relayout()
         self.settings["phone_height"] = self.phone_h
 
@@ -345,6 +378,11 @@ class PhoneWindow(QWidget):
             self.ctrl.stop()
         self.wireless.start(self.wireless_device)
 
+    def disconnect_wireless(self):
+        self.settings["wireless_auto_connect"] = False
+        self.settings.save()
+        self.wireless.stop()
+
     def _on_wireless_state(self, state, message):
         self.wireless_message = message
         if state in (STARTING, OFF, ERROR):
@@ -365,6 +403,9 @@ class PhoneWindow(QWidget):
         if state == ERROR:
             self._show_control_error(message)
         if state == READY:
+            self.settings["wireless_auto_connect"] = True
+            self.settings["wireless_device"] = self.wireless_device
+            self.settings.save()
             self.setFocus()
         self._update_wireless_button()
         self._flash_bar()
@@ -462,8 +503,7 @@ class PhoneWindow(QWidget):
         p.setPen(QPen(QColor(0, 0, 0, 120), 1))
         p.drawRoundedRect(rect.adjusted(-0.5, -0.5, 0.5, 0.5), r + 0.5, r + 0.5)
 
-        if self.hover:
-            self._paint_bar(p)
+        self._update_toolbar()
         p.end()
 
     def _paint_placeholder(self, p, rect, r):
@@ -510,7 +550,7 @@ class PhoneWindow(QWidget):
 
         addrs = self.info.get("addresses") or []
         if addrs:
-            f = QFont("Segoe UI", 8)
+            f = QFont("Sans Serif", 8)
             p.setFont(f)
             p.setPen(QColor(255, 255, 255, 90))
             p.drawText(
@@ -537,12 +577,12 @@ class PhoneWindow(QWidget):
 
     def _center_text(self, p, rect, title, sub):
         w = rect.width()
-        tf = QFont("Segoe UI Semibold", max(11, int(w * 0.055)))
+        tf = QFont("Sans Serif", max(11, int(w * 0.055)))
         p.setFont(tf)
         p.setPen(QColor(255, 255, 255, 240))
         y = rect.y() + rect.height() * 0.5
         p.drawText(QRectF(rect.x() + w * 0.08, y, w * 0.84, w * 0.12), Qt.AlignHCenter | Qt.AlignTop, title)
-        sf = QFont("Segoe UI", max(9, int(w * 0.034)))
+        sf = QFont("Sans Serif", max(9, int(w * 0.034)))
         p.setFont(sf)
         p.setPen(QColor(255, 255, 255, 170))
         p.drawText(
@@ -592,24 +632,19 @@ class PhoneWindow(QWidget):
             p.drawEllipse(g["pos"] if g["moved"] else g["pos0"], 11, 11)
         p.restore()
 
-    # hover bar: [label .......... control  home  pin  -  x]
-    def _bar_rect(self) -> QRectF:
-        rect = self.phone_rect()
-        return QRectF(rect.x() + 6, SHADOW + 2, rect.width() - 12, BAR - 10)
-
-    def _buttons(self):
-        b = self._bar_rect()
-        names = ("control", "home", "pin", "min", "close")
-        s = min(b.height(), max(18.0, (b.width() - 40) / len(names)))
-        y = b.center().y() - s / 2
-        right = b.right() - max(0.0, (b.height() - s) / 2)
-        return {n: QRectF(right - (len(names) - i) * s, y, s, s) for i, n in enumerate(names)}
-
     def _button_at(self, pos):
-        for name, r in self._buttons().items():
-            if r.contains(pos):
-                return name
-        return None
+        return None  # toolbar buttons receive their own Qt mouse events
+
+    def _update_toolbar(self):
+        width = max(0, self._toolbar.width() - 16)
+        label = self._bar_labels()[0]
+        self._status_label.setText(self._status_label.fontMetrics().elidedText(label, Qt.ElideRight, width))
+        self._status_label.setToolTip(label)
+        for name, button in self._toolbar_buttons.items():
+            button.setToolTip(self._button_tip(name))
+        self._toolbar_buttons["home"].setEnabled(self._control_ready())
+        self._toolbar_buttons["control"].setChecked(self.wireless.active or bool(self.ctrl and self.ctrl.active))
+        self._toolbar_buttons["pin"].setChecked(self.settings.get("always_on_top", True))
 
     def _control_status(self) -> str:
         if self.wireless.ready:
@@ -644,85 +679,6 @@ class PhoneWindow(QWidget):
     def _bar_label(self) -> str:
         return self._bar_labels()[0]
 
-    def _control_color(self) -> QColor:
-        st = self.wireless.state if self.wireless.active else self.control_state
-        if st == READY:
-            return QColor(GREEN)
-        if st == STARTING:
-            c = QColor(ORANGE)
-            c.setAlphaF(0.35 + 0.65 * (0.5 + 0.5 * math.sin(time.monotonic() * 2 * math.pi / 1.1)))
-            return c
-        if st == ERROR:
-            return QColor(RED)
-        return QColor(255, 255, 255, 220)
-
-    def _paint_bar(self, p):
-        b = self._bar_rect()
-        p.setPen(Qt.NoPen)
-        p.setBrush(QColor(30, 30, 34, 225))
-        p.drawRoundedRect(b, b.height() / 2, b.height() / 2)
-        btn = self._buttons()
-
-        font = QFont("Segoe UI Semibold", 9)
-        p.setFont(font)
-        text_rect = QRectF(b.x() + 14, b.y(), max(0.0, btn["control"].left() - b.x() - 18), b.height())
-        fm = QFontMetrics(font)
-        labels = self._bar_labels()
-        label = next((t for t in labels if fm.horizontalAdvance(t) <= text_rect.width()), None)
-        if label is None:
-            label = fm.elidedText(labels[-1], Qt.ElideRight, int(text_rect.width()))
-        p.setPen(QColor(255, 255, 255, 220))
-        p.drawText(text_rect, Qt.AlignVCenter | Qt.AlignLeft, label)
-
-        s = btn["close"].width()
-        k = s / 30  # glyph scale
-        if self._hover_btn in btn:
-            p.setPen(Qt.NoPen)
-            p.setBrush(QColor(255, 255, 255, 34))
-            p.drawEllipse(btn[self._hover_btn].center(), s * 0.42, s * 0.42)
-
-        self._paint_hand(p, btn["control"].center() + QPointF(0.8 * k, 0.4 * k), k * 0.95, self._control_color())
-
-        white = QColor(255, 255, 255, 220)
-        d = 4.5 * k
-        c = btn["home"].center()
-        home_on = self._control_ready()
-        p.setPen(QPen(white if home_on else QColor(255, 255, 255, 110), 1.6))
-        p.setBrush(Qt.NoBrush)
-        p.drawEllipse(c, 5.6 * k, 5.6 * k)
-
-        pen = QPen(white, 1.6, Qt.SolidLine, Qt.RoundCap)
-        p.setPen(pen)
-        c = btn["close"].center()
-        p.drawLine(QPointF(c.x() - d, c.y() - d), QPointF(c.x() + d, c.y() + d))
-        p.drawLine(QPointF(c.x() - d, c.y() + d), QPointF(c.x() + d, c.y() - d))
-        c = btn["min"].center()
-        p.drawLine(QPointF(c.x() - d, c.y()), QPointF(c.x() + d, c.y()))
-        c = btn["pin"].center()
-        on = self.settings.get("always_on_top", True)
-        p.setBrush(white if on else Qt.NoBrush)
-        p.drawEllipse(QPointF(c.x(), c.y() - 1.6 * k), 3.6 * k, 3.6 * k)
-        p.drawLine(QPointF(c.x(), c.y() + 2.0 * k), QPointF(c.x(), c.y() + 6.4 * k))
-
-    @staticmethod
-    def _paint_hand(p, c, k, color):
-        """Hand with a raised index finger (the 'control the iPhone' glyph)."""
-
-        def rr(x, y, w, h, r):
-            q = QPainterPath()
-            q.addRoundedRect(QRectF(c.x() + x * k, c.y() + y * k, w * k, h * k), r * k, r * k)
-            return q
-
-        path = rr(-2.0, -9.0, 3.6, 10.0, 1.8)  # index finger
-        path = path.united(rr(-4.4, -2.6, 10.4, 10.6, 3.2))  # palm with folded fingers
-        path = path.united(rr(-7.6, 0.4, 5.0, 3.6, 1.8))  # thumb
-        p.setPen(Qt.NoPen)
-        p.setBrush(color)
-        p.drawPath(path)
-        p.setPen(QPen(QColor(30, 30, 34, 200), 1.0 * max(1.0, k)))
-        for x in (1.8, 4.0):  # gaps between the folded fingers
-            p.drawLine(QPointF(c.x() + x * k, c.y() - 2.2 * k), QPointF(c.x() + x * k, c.y() + 1.4 * k))
-
     def _bar_off(self):
         self.hover = False
         self._hover_btn = None
@@ -745,7 +701,7 @@ class PhoneWindow(QWidget):
 
     # ------------------------------------------------------------ animation
     def _needs_anim(self):
-        return bool(self._effects) or (self.hover and (self.control_state == STARTING or self.wireless.state == STARTING))
+        return bool(self._effects)
 
     def _update_anim(self):
         if self._needs_anim() and not self._anim.isActive():
@@ -776,7 +732,9 @@ class PhoneWindow(QWidget):
 
     def _toggle_control(self):
         if self.wireless.active:
-            self.wireless.stop()
+            self.disconnect_wireless()
+        elif self.state not in ("mirroring", "paused", "connecting"):
+            self.connect_wireless()
         elif self.ctrl is None:
             self._hint("iPhone control is not available")
         elif self.ctrl.active:  # the controller's own state: the shown one may lag behind
@@ -943,7 +901,7 @@ class PhoneWindow(QWidget):
                 READY: "iPhone control is on - click to turn it off (Ctrl+U)",
                 STARTING: "iPhone control is starting - click to cancel (Ctrl+U)",
                 ERROR: "iPhone control failed - click to try again (Ctrl+U)",
-            }.get(self.control_state, "Control iPhone over USB (Ctrl+U)")
+            }.get(self.control_state, "Connect or toggle iPhone control (Ctrl+U)")
         return {"home": "Home (Ctrl+H)", "pin": "Always on top", "min": "Minimize", "close": "Close"}[name]
 
     def mousePressEvent(self, e):
@@ -1095,7 +1053,7 @@ class PhoneWindow(QWidget):
         m = QMenu(self)
         ready = self._control_ready()
         if self.wireless.active:
-            m.addAction("Disconnect Wi-Fi", self.wireless.stop)
+            m.addAction("Disconnect Wi-Fi", self.disconnect_wireless)
         else:
             m.addAction("Connect over Wi-Fi", self.connect_wireless)
         ctl = QAction(

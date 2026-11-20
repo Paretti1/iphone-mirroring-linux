@@ -10,7 +10,7 @@ import numpy as np
 from cryptography.hazmat.decrepit.ciphers.algorithms import TripleDES
 from cryptography.hazmat.primitives.ciphers import Cipher, modes
 from PySide6.QtCore import QObject, QProcess, QTimer, Qt, Signal
-from PySide6.QtNetwork import QTcpSocket
+from PySide6.QtNetwork import QAbstractSocket, QTcpSocket
 
 from .control import ERROR, OFF, READY, STARTING
 from .control.wireless import LOOPBACK, dependency_error, remote_args
@@ -52,6 +52,14 @@ class FramebufferClient(QObject):
         self.socket = QTcpSocket(self)
         self.socket.setReadBufferSize(MAX_FRAME_BYTES + 65536)
         self.socket.readyRead.connect(self._read)
+        self.socket.connected.connect(
+            lambda: self.socket.setSocketOption(QAbstractSocket.LowDelayOption, 1)
+        )
+        self.drain_timer = QTimer(self, singleShot=True, interval=0)
+        self.drain_timer.timeout.connect(self._read)
+        self.present_timer = QTimer(self, singleShot=True, interval=16)
+        self.present_timer.timeout.connect(self._present)
+        self._latest_frame = None
         self.socket.errorOccurred.connect(lambda _: self._fail(self.socket.errorString()))
         self._messages = None
         self._size = 0
@@ -65,6 +73,9 @@ class FramebufferClient(QObject):
 
     def close(self):
         self._messages = None
+        self.drain_timer.stop()
+        self.present_timer.stop()
+        self._latest_frame = None
         self.width = self.height = 0
         self.socket.abort()
 
@@ -74,13 +85,23 @@ class FramebufferClient(QObject):
             self.failed.emit(message)
 
     def _read(self):
+        consumed = 0
         try:
             while self._messages is not None and self.socket.bytesAvailable() >= self._size:
                 packet = bytes(self.socket.read(self._size)) if self._size else b""
+                consumed += len(packet)
                 required = self._messages.send(packet)
                 self._size = required
+                if consumed >= 8 * 1024 * 1024:
+                    self.drain_timer.start()
+                    break
         except (OSError, ValueError, struct.error) as exc:
             self._fail(str(exc))
+
+    def _present(self):
+        pending, self._latest_frame = self._latest_frame, None
+        if pending is not None:
+            self.frame.emit(*pending)
 
     def _resize(self, width, height):
         if not width or not height or width * height * 4 > MAX_FRAME_BYTES:
@@ -131,7 +152,9 @@ class FramebufferClient(QObject):
                     raise ValueError("The local wireless viewer sent an unsupported frame layout.")
                 pixels = yield width * height * 4
                 frame = np.frombuffer(pixels, dtype=np.uint8).reshape(height, width, 4)
-                self.frame.emit(frame, width, height)
+                self._latest_frame = (frame, width, height)
+                if not self.present_timer.isActive():
+                    self.present_timer.start()
             self._request_frame(True)
 
     def pointer(self, x, y, pressed):
@@ -182,6 +205,10 @@ class DesktopWireless(QObject):
         self._port = 0
         self._password = ""
         self._remote = []
+        self._device_id = None
+        self._retries = 0
+        self.retry_timer = QTimer(self, singleShot=True, interval=2000)
+        self.retry_timer.timeout.connect(self._retry)
 
     @property
     def active(self):
@@ -195,9 +222,12 @@ class DesktopWireless(QObject):
         self.state = state
         self.state_changed.emit(state, message)
 
-    def start(self, device_id=None):
+    def start(self, device_id=None, *, retry=False):
         if self.active or self.process.state() != QProcess.NotRunning:
             return
+        self._device_id = device_id
+        if not retry:
+            self._retries = 0
         error = dependency_error()
         if error:
             self._set_state(ERROR, error)
@@ -213,7 +243,7 @@ class DesktopWireless(QObject):
         self._password = secrets.token_hex(4)
         self._remote = remote_args(device_id)
         self._phase = "mount"
-        self.deadline.start()
+        self.deadline.start(300000)
         self._set_state(STARTING, "Preparing the paired iPhone…")
         self._run(["mounter", "auto-mount", *self._remote])
 
@@ -241,8 +271,12 @@ class DesktopWireless(QObject):
         self._read_process()
         if not self.active:
             return
+        if self._phase == "retry":
+            self.retry_timer.start()
+            return
         if self._phase == "mount" and code == 0 and status == QProcess.NormalExit:
             self._phase = "serve"
+            self.deadline.start(45000)
             self._set_state(STARTING, "Connecting to the iPhone display…")
             self._run([
                 "developer", "core-device", "display", "serve-vnc",
@@ -251,7 +285,7 @@ class DesktopWireless(QObject):
             ])
         else:
             detail = self._pending_output.decode("utf-8", errors="replace").strip() or self._last_output
-            self._fail(detail or f"The wireless viewer stopped (exit code {code}).")
+            self._fail(f"The wireless viewer stopped (exit code {code}). {detail}".strip())
 
     def _process_error(self, error):
         if error == QProcess.FailedToStart:
@@ -265,11 +299,33 @@ class DesktopWireless(QObject):
             self.frame.emit(data, width, height)
 
     def _fail(self, message):
-        if self.active:
+        if not self.active or self._phase == "retry":
+            return
+        log.warning("Wireless connection interrupted: %s", message)
+        terminal = any(text in message.lower() for text in (
+            "no remotepairing record", "no remote pairing record", "not paired", "unsupported", "authentication"
+        ))
+        if self._retries >= 3 or terminal:
             self._stop(ERROR, message)
+            return
+        self._retries += 1
+        self._phase = "retry"
+        self._stop(STARTING, f"Reconnecting over Wi-Fi… (attempt {self._retries}/3)")
+        if self.process.state() == QProcess.NotRunning:
+            self.retry_timer.start()
+
+    def _retry(self):
+        if not self.active:
+            return
+        if self.process.state() != QProcess.NotRunning:
+            self.retry_timer.start()
+            return
+        self.state = OFF
+        self.start(self._device_id, retry=True)
 
     def _stop(self, state, message=""):
         self.deadline.stop()
+        self.retry_timer.stop()
         self._cancel_scroll()
         self.client.close()
         self._set_state(state, message)

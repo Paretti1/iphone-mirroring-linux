@@ -793,6 +793,12 @@ class CliTests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("[FAIL]", out)
 
+    def test_pair_once_over_usb(self):
+        with mock.patch.object(cli.wireless, "run_tool", return_value=0) as run:
+            code, out = self.run_cli("wireless-pair", "--usb")
+        self.assertEqual(code, 0, out)
+        run.assert_called_once_with(["lockdown", "remotepairing", "--pair"])
+
     def test_wireless_viewer_requires_a_paired_device_and_local_password(self):
         with mock.patch.object(cli.wireless, "run_tool", return_value=0) as run:
             code, out = self.run_cli("wireless", "--device-id", "DEVICE1", "--vnc")

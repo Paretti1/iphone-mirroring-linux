@@ -64,6 +64,37 @@ class DesktopWirelessTest(unittest.TestCase):
             QTest.qWait(20)
         self.fail(message)
 
+    def test_toolbar_at_small_sizes_and_control_states(self):
+        app = QApplication.instance() or QApplication([])
+        with tempfile.TemporaryDirectory() as directory:
+            window = PhoneWindow(Settings(Path(directory) / "settings.json"), None)
+            window.show()
+            try:
+                for aspect in (0.46, 2.16):
+                    window.aspect = aspect
+                    for height in (160, 320, 600):
+                        window.set_phone_height(height)
+                        app.processEvents()
+                        toolbar = window._toolbar
+                        buttons = list(window._toolbar_buttons.values())
+                        self.assertTrue(toolbar.isVisible())
+                        for index, button in enumerate(buttons):
+                            self.assertTrue(button.isVisible())
+                            self.assertGreaterEqual(button.width(), 32)
+                            if index:
+                                self.assertGreater(button.x(), buttons[index - 1].geometry().right())
+                        self.assertFalse(window._toolbar_buttons["home"].isEnabled())
+                        previous = window.settings["always_on_top"]
+                        QTest.mouseClick(window._toolbar_buttons["pin"], Qt.LeftButton)
+                        self.assertEqual(window.settings["always_on_top"], not previous)
+                window.aspect = 0.46
+                window.set_phone_height(600)
+                app.processEvents()
+                window.grab().save("/tmp/iphone-toolbar-review.png")
+            finally:
+                window.wireless.shutdown()
+                window.close()
+
     def test_desktop_connects_displays_controls_and_disconnects(self):
         app = QApplication.instance() or QApplication([])
         with tempfile.TemporaryDirectory() as directory:
@@ -126,7 +157,17 @@ class DesktopWirelessTest(unittest.TestCase):
                     self.assertEqual([row[1] for row in swipe], ["1"] * 6 + ["0"])
                     self.assertLess(int(swipe[-1][3]), int(swipe[0][3]))
 
-                    bridge.stop()
+                    old_process = bridge.process.processId()
+                    bridge.process.kill()
+                    self.wait_for(
+                        lambda: bridge.ready and bridge.process.processId() != old_process,
+                        "Desktop did not reconnect after the viewer exited", timeout=10,
+                    )
+                    self.assertTrue(window.settings.get("wireless_auto_connect"))
+                    self.assertEqual(window.settings.get("wireless_device"), "PAIRED-ID")
+                    self.assertTrue(window._toolbar_buttons["home"].isEnabled())
+                    window.disconnect_wireless()
+                    self.assertFalse(window.settings.get("wireless_auto_connect"))
                     self.wait_for(lambda: not bridge.process.processId(), "Local viewer did not stop")
                     self.assertTrue(window._wireless_button.isVisible())
                     self.assertIsNone(window.image)

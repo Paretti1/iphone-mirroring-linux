@@ -103,6 +103,30 @@ This is the path for scrolling and tapping over Wi-Fi with no cable attached dur
 
 If you already created the pairing over USB, you can go straight to step 3. Stop an existing browser or VNC session before switching to the desktop app. The desktop viewer is silent on Linux.
 
+After a successful Wi-Fi connection, the app remembers to reconnect on the next launch. Temporary viewer failures retry up to three times. Use **Control**, **Ctrl+U**, or **Disconnect Wi-Fi** to deliberately disconnect and turn off automatic connection.
+
+### Pair once over USB
+
+If the phone does not discover the computer in Paired Macs, connect the unlocked iPhone once, tap **Trust**, and run:
+
+```bash
+~/.local/bin/iphone-mirroring-control wireless-pair --usb
+```
+
+This saves the developer pairing on the computer. Unplug the cable and launch the app to connect over Wi-Fi. Keep Developer Mode enabled. Changing Wi-Fi networks does not itself erase the pairing. At the new location, both devices must be on a network that lets them communicate directly. Guest, school, hotel, or isolated networks can block discovery. Resetting device trust or removing the pairing requires pairing again.
+
+### Update an existing installation
+
+Close the app and any terminal viewer first. In a Git checkout, run:
+
+```bash
+git pull --ff-only
+./install.sh --control
+~/.local/bin/iphone-mirroring-linux --wireless
+```
+
+For a ZIP installation, extract a new copy from **Code → Download ZIP**, open a terminal in that extracted folder, and run the last two commands above. The installer updates the existing application and keeps the pairing and settings. A pairing already used successfully with the previous version can be reused.
+
 To pick a device when there are several pairing records, launch the desktop app with `iphone-mirroring-linux --wireless --device-id YOUR_PAIRED_ID`. The command-line browser and VNC viewers are still available through `iphone-mirroring-control wireless` and `iphone-mirroring-control wireless --vnc`.
 
 The Wi-Fi viewer uses [pymobiledevice3’s developer display and input services](https://doronz88.github.io/pymobiledevice3/master/guides/screen-mirroring/) and [PIN pairing](https://doronz88.github.io/pymobiledevice3/master/cli/remote/#pair-host).
