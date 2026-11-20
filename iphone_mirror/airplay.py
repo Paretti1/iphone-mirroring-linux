@@ -6,6 +6,7 @@ import plistlib
 import struct
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 from . import discovery, net
 from .audio import AudioStream, Player
@@ -285,8 +286,7 @@ class Connection:
                 resp.status, resp.reason = 453, "Not Enough Bandwidth"
                 resp.close = True
                 return
-            loop = asyncio.get_running_loop()
-            aeskey = await loop.run_in_executor(None, self.fairplay.decrypt, plist["ekey"])
+            aeskey = await rx.run_io(self.fairplay.decrypt, plist["ekey"])
             if rx.session_owner not in (None, self):
                 resp.status, resp.reason = 453, "Not Enough Bandwidth"
                 resp.close = True
@@ -398,6 +398,7 @@ class Receiver:
         self._stop_requested = threading.Event()
         self._stopping = None
         self._thread = None
+        self._executor = None
         self._server = None
 
     def emit(self, event, **info):
@@ -436,13 +437,26 @@ class Receiver:
 
     def _run(self):
         try:
-            asyncio.run(self._main())
+            # Python 3.15's default asyncio pool can expose an unresolved lazy
+            # ThreadPoolExecutor after Qt initializes. Use an explicitly imported
+            # class and pass our owned pool directly, without changing stdlib state.
+            with ThreadPoolExecutor(max_workers=4, thread_name_prefix="airplay-io") as executor:
+                self._executor = executor
+                try:
+                    asyncio.run(self._main())
+                finally:
+                    self._executor = None
         except OSError as e:
             log.error("AirPlay listener failed: %s", e)
             self.emit("error", message=f"Could not listen on TCP port {net.PORT}. See the log for details.")
         except Exception:
             log.exception("receiver crashed")
             self.emit("error", message="The AirPlay server crashed. See the log for details.")
+
+    async def run_io(self, function, *args):
+        if self._executor is None:
+            raise RuntimeError("The AirPlay I/O worker has not started")
+        return await asyncio.get_running_loop().run_in_executor(self._executor, function, *args)
 
     async def _handle(self, reader, writer):
         task = asyncio.current_task()
@@ -478,7 +492,7 @@ class Receiver:
                 await self._server.wait_closed()
             if self.advertiser is not None:
                 async with self._advertisement_lock:
-                    await asyncio.to_thread(self.advertiser.stop)
+                    await self.run_io(self.advertiser.stop)
             if self.player is not None:
                 self.player.close()
 
@@ -487,8 +501,8 @@ class Receiver:
             if self._stop_requested.is_set():
                 return
             try:
-                await asyncio.to_thread(self.advertiser.stop)
-                await asyncio.to_thread(self.advertiser.start)
+                await self.run_io(self.advertiser.stop)
+                await self.run_io(self.advertiser.start)
                 self.emit(
                     "listening", name=self.settings["name"], addresses=self.advertiser.addresses, port=self.port
                 )

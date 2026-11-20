@@ -182,6 +182,22 @@ bypass the lock screen or provide Apple's separate locked-device Continuity
 mirroring mode. Reducing brightness is possible on the phone, but it does not
 turn the display off or lock the device.
 
+### Public Wi-Fi and VPNs
+
+Public or guest networks can isolate clients and block Bonjour/mDNS even when
+both devices show the same Wi-Fi name. See the [network isolation documentation](https://documentation.meraki.com/Wireless/Operate_and_Maintain/How_Tos/Firewall_and_Traffic_Shaping/Wireless_Client_Isolation).
+The developer viewer requires local discovery and a reachable paired iPhone.
+If it reports that the phone did not answer over RemotePairing (Bonjour), keep
+the phone awake and unlocked, complete any Wi-Fi sign-in page on both devices,
+and test on a private network that allows devices to communicate. An ordinary
+internet VPN does not create this local connection or override client isolation.
+Preserve the existing pairing while checking the network.
+
+Python 3.15 with Qt needs an explicitly owned AirPlay I/O pool for discovery,
+FairPlay key decryption, and shutdown. The app supplies that pool rather than
+relying on the default asyncio executor. A Python `lazy_import` traceback is an
+application/runtime failure and is separate from a phone discovery timeout.
+
 | Input | Result |
 | --- | --- |
 | Drag an outside edge or corner | Resize the window while preserving the phone image's proportions |
@@ -253,6 +269,7 @@ python tests/test_fairplay.py
 python tests/test_wda.py
 python tests/test_desktop_wireless.py
 python tests/test_wireless_video.py
+python tests/test_airplay_lifecycle.py
 python tools/smoke_test.py
 ```
 

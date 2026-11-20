@@ -214,6 +214,7 @@ class DesktopWireless(QObject):
         self._phase = ""
         self._pending_output = b""
         self._last_output = ""
+        self._last_error = ""
         self._port = 0
         self._password = ""
         self._remote = []
@@ -278,6 +279,7 @@ class DesktopWireless(QObject):
     def _run(self, args):
         self._pending_output = b""
         self._last_output = ""
+        self._last_error = ""
         module = "iphone_mirror.wireless_backend" if self._phase == "serve" else "pymobiledevice3"
         environment = QProcessEnvironment.systemEnvironment()
         environment.insert("IPHONE_MIRROR_PREVIEW_EDGE", str(self.preview_edge))
@@ -296,6 +298,8 @@ class DesktopWireless(QObject):
                 continue
             log.info("Wireless viewer: %s", line)
             self._last_output = line
+            if " ERROR " in f" {line} ":
+                self._last_error = line
             if self.active and self._phase == "serve" and "VNC ready:" in line:
                 self._phase = "viewer"
                 self.client.connect_to(self._port, self._password)
@@ -320,7 +324,13 @@ class DesktopWireless(QObject):
                 "--password", self._password, *self._remote,
             ])
         else:
-            detail = self._pending_output.decode("utf-8", errors="replace").strip() or self._last_output
+            detail = self._last_error or self._pending_output.decode("utf-8", errors="replace").strip() or self._last_output
+            if "did not answer over remotepairing (bonjour)" in detail.lower():
+                detail = (
+                    "The paired iPhone did not answer over Wi-Fi. Keep it awake and unlocked on the same network. "
+                    "Public or guest Wi-Fi may block Bonjour discovery or connections between devices. "
+                    "Try a private Wi-Fi network; a normal VPN does not remove this local-network restriction."
+                )
             self._fail(f"The wireless viewer stopped (exit code {code}). {detail}".strip())
 
     def _process_error(self, error):

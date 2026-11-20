@@ -163,6 +163,34 @@ class DesktopWirelessTest(unittest.TestCase):
             QTest.qWait(20)
         self.fail(message)
 
+    def test_discovery_failure_keeps_the_actual_error_and_explains_guest_wifi(self):
+        app = QApplication.instance() or QApplication([])
+        backend = DesktopWireless()
+        backend._phase = "mount"
+        backend.state = "starting"
+        backend._retries = 3
+        states = []
+        backend.state_changed.connect(lambda state, message: states.append((state, message)))
+        launch = backend.process.start
+        script = (
+            'print("ERROR DEVICE-ID did not answer over RemotePairing (bonjour).")\n'
+            'print("INFO Run again with -v for the full traceback")\n'
+            'raise SystemExit(1)\n'
+        )
+        try:
+            with patch.object(backend.process, "start", side_effect=lambda *args: launch(sys.executable, ["-c", script])):
+                backend._run(["mounter"])
+                self.wait_for(lambda: backend.state == "error", "Discovery failure did not reach the UI")
+            message = states[-1][1]
+            self.assertIn("paired iPhone did not answer", message)
+            self.assertIn("Public or guest Wi-Fi", message)
+            self.assertIn("private Wi-Fi", message)
+            self.assertNotIn("Run again with -v", message)
+            self.assertIn("did not answer", backend._last_error)
+        finally:
+            backend.shutdown()
+            app.processEvents()
+
     def test_video_presents_on_the_next_event_loop_turn(self):
         app = QApplication.instance() or QApplication([])
         client = FramebufferClient()
