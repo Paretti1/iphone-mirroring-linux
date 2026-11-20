@@ -15,7 +15,9 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from pymobiledevice3.remote.core_device.vnc_server import VncStreamServer
-from iphone_mirror.wireless_backend import request_software_keyframe
+from iphone_mirror.wireless_backend import (
+    diagnostic_receiver, diagnostic_transcoder, request_software_keyframe,
+)
 
 
 def encoded_frames():
@@ -105,6 +107,30 @@ class WirelessVideoTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_legacy_refresh_stops_video_after_first_image(self):
         await self.exercise(refresh=True)
+
+    async def test_diagnostics_preserve_video_and_report_each_stage(self):
+        receive = diagnostic_receiver(VncStreamServer._udp_recv_and_pipe)
+        create = diagnostic_transcoder(VncStreamServer._new_transcoder)
+        with (
+            patch.object(VncStreamServer, "_fire_decoder_refresh", request_software_keyframe),
+            patch.object(VncStreamServer, "_udp_recv_and_pipe", receive),
+            patch.object(VncStreamServer, "_new_transcoder", create),
+            self.assertLogs("iphone_mirror.wireless_backend", level="INFO") as records,
+        ):
+            await self.exercise(refresh=False)
+        final = next(line for line in records.output if "ingress_stopped" in line)
+        for counter in ("fed=20", "decoded=20", "published=20", "decode_errors=0", "queued=0"):
+            self.assertIn(counter, final)
+
+    async def test_diagnostics_report_even_when_no_packets_arrive(self):
+        viewer = VncStreamServer(SimpleNamespace(service=SimpleNamespace(address=("127.0.0.1", 0))), decoder="av")
+        with self.assertLogs("iphone_mirror.wireless_backend", level="INFO") as records:
+            task = asyncio.create_task(diagnostic_receiver(VncStreamServer._udp_recv_and_pipe)(viewer, Transport()))
+            await asyncio.sleep(0.02)
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        self.assertTrue(any("backend packets=0 bytes=0" in line for line in records.output))
+        self.assertTrue(any("ingress_stopped" in line for line in records.output))
 
 
 if __name__ == "__main__":

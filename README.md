@@ -181,6 +181,20 @@ On Fedora GNOME, the desktop app uses XWayland when available for window positio
 
 ## Settings and logs
 
+If Wi-Fi input works but the desktop picture freezes, close the app and run
+`~/.local/bin/iphone-mirroring-linux --wireless --diagnose`. Keep moving the
+iPhone screen for 20 seconds, then close the app. This mode logs installed versions,
+incoming packet counts, decoded frames, decoder queue depth, and desktop received
+and presented frames every five seconds, including while video is stalled. It
+does not save the phone's video or input. Extract the counters with:
+
+```bash
+grep 'WIRELESS_DIAG' "${XDG_STATE_HOME:-$HOME/.local/state}/iphone-mirroring-linux/iphone_mirror.log" | tail -35
+```
+
+These counters distinguish device or transport stalls from decoder and desktop
+display stalls. A synthetic HEVC test cannot verify a physical iPhone's stream.
+
 - Settings are in `${XDG_CONFIG_HOME:-~/.config}/iphone-mirroring-linux/settings.json`. The file includes `name`, `height`, `width`, `fps`, `audio`, and `always_on_top`. Quit before editing. The default request is 1080p at 60 fps. The actual stream depends on the phone and network.
 - Logs are in `${XDG_STATE_HOME:-~/.local/state}/iphone-mirroring-linux/`. The **Open Log** menu item opens the app log.
 - Screenshots are saved in **Pictures → iPhone Mirroring Linux** using the desktop’s configured Pictures folder.

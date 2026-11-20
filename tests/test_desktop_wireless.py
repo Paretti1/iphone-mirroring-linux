@@ -161,6 +161,7 @@ class DesktopWirelessTest(unittest.TestCase):
             QTest.qWait(20)
         self.fail(message)
 
+    @patch.dict(os.environ, {"IPHONE_MIRROR_DIAGNOSTICS": "1"})
     def test_hevc_video_keeps_updating_while_input_is_sent(self):
         app = QApplication.instance() or QApplication([])
         with tempfile.TemporaryDirectory() as directory:
@@ -197,6 +198,7 @@ class DesktopWirelessTest(unittest.TestCase):
                     self.assertIn("pointer", events.read_text())
                     self.assertIn("key", events.read_text())
                     self.assertTrue(backend.ready)
+                    self.assertTrue(backend.diagnostic_timer.isActive())
                     # The old input watchdog disconnected a healthy session after eight
                     # seconds with no further video. Let the encoded sequence finish,
                     # send input, and ensure that static pictures keep the session alive.
@@ -205,6 +207,10 @@ class DesktopWirelessTest(unittest.TestCase):
                     QTest.qWait(8500)
                     self.assertTrue(backend.ready)
                     self.assertEqual(len(commands), 2, "A static picture triggered a reconnect")
+                    with self.assertLogs("iphone_mirror.desktop_wireless", level="INFO") as logs:
+                        backend._diagnose()
+                    self.assertIn("WIRELESS_DIAG desktop phase=viewer state=ready", logs.output[0])
+                    self.assertIn(f"presented={len(received)}", logs.output[0])
             finally:
                 backend.shutdown()
                 window.close()

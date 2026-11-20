@@ -4,6 +4,7 @@ import logging
 import os
 import signal
 import sys
+from importlib.metadata import PackageNotFoundError, version
 from ipaddress import IPv4Address
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
@@ -56,6 +57,7 @@ def parse_args():
     p.add_argument("--port", type=airplay_port, help=f"RTSP port (default {net.PORT}, or {LOCAL_PORT} with --local)")
     p.add_argument("--bind", type=IPv4Address, help="limit AirPlay to one local IPv4 address")
     p.add_argument("--wireless", action="store_true", help="connect a paired iPhone over Wi-Fi at launch")
+    p.add_argument("--diagnose", action="store_true", help="log wireless video stage counters every five seconds")
     p.add_argument("--device-id", help="select a previously paired iPhone for Wi-Fi control")
     p.add_argument("--control", action="store_true", help="start iPhone control (USB / WebDriverAgent) at launch")
     p.add_argument("--wda-url", help="use an existing, trusted WebDriverAgent HTTP endpoint")
@@ -66,6 +68,8 @@ def parse_args():
 
 def main():
     args = parse_args()
+    if args.diagnose:
+        os.environ["IPHONE_MIRROR_DIAGNOSTICS"] = "1"
     if args.local:
         net.BIND_HOST = "127.0.0.1"
         net.ADVERTISE = False
@@ -75,6 +79,15 @@ def main():
     if args.port:
         net.PORT = args.port
     setup_logging()
+    if args.diagnose:
+        packages = []
+        for name in ("iphone-mirroring-linux", "pymobiledevice3", "av", "PySide6-Essentials"):
+            try:
+                installed = version(name)
+            except PackageNotFoundError:
+                installed = "missing"
+            packages.append(f"{name}={installed}")
+        logging.info("WIRELESS_DIAG versions Python=%s %s", sys.version.split()[0], " ".join(packages))
     if (
         os.environ.get("XDG_SESSION_TYPE") == "wayland"
         and "gnome" in os.environ.get("XDG_CURRENT_DESKTOP", "").lower()

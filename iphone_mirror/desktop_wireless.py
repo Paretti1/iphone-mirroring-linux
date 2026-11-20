@@ -1,6 +1,7 @@
 """Use pymobiledevice3's localhost VNC stream inside the Qt desktop window."""
 
 import logging
+import os
 import secrets
 import socket
 import struct
@@ -65,9 +66,11 @@ class FramebufferClient(QObject):
         self._messages = None
         self._size = 0
         self.width = self.height = 0
+        self.received_bytes = self.received_frames = self.presented_frames = 0
 
     def connect_to(self, port, password):
         self.close()
+        self.received_bytes = self.received_frames = self.presented_frames = 0
         self._messages = self._receive(password)
         self._size = next(self._messages)
         self.socket.connectToHost(LOOPBACK, port)
@@ -91,6 +94,7 @@ class FramebufferClient(QObject):
             while self._messages is not None and self.socket.bytesAvailable() >= self._size:
                 packet = bytes(self.socket.read(self._size)) if self._size else b""
                 consumed += len(packet)
+                self.received_bytes += len(packet)
                 required = self._messages.send(packet)
                 self._size = required
                 if consumed >= 8 * 1024 * 1024:
@@ -102,6 +106,7 @@ class FramebufferClient(QObject):
     def _present(self):
         pending, self._latest_frame = self._latest_frame, None
         if pending is not None:
+            self.presented_frames += 1
             self.frame.emit(*pending)
 
     def _resize(self, width, height):
@@ -154,6 +159,7 @@ class FramebufferClient(QObject):
                 pixels = yield width * height * 4
                 frame = np.frombuffer(pixels, dtype=np.uint8).reshape(height, width, 4)
                 self._latest_frame = (frame, width, height)
+                self.received_frames += 1
                 if not self.present_timer.isActive():
                     self.present_timer.start()
             self._request_frame(True)
@@ -212,6 +218,17 @@ class DesktopWireless(QObject):
         self._received_frames = 0
         self.retry_timer = QTimer(self, singleShot=True, interval=2000)
         self.retry_timer.timeout.connect(self._retry)
+        self.diagnostic_timer = QTimer(self, interval=5000)
+        self.diagnostic_timer.timeout.connect(self._diagnose)
+
+    def _diagnose(self):
+        log.info(
+            "WIRELESS_DIAG desktop phase=%s state=%s bytes=%d received=%d presented=%d "
+            "buffered=%d waiting=%d size=%dx%d process=%s",
+            self._phase, self.state, self.client.received_bytes, self.client.received_frames,
+            self.client.presented_frames, self.client.socket.bytesAvailable(), self.client._size,
+            self.client.width, self.client.height, self.process.state().name,
+        )
 
     @property
     def active(self):
@@ -246,6 +263,8 @@ class DesktopWireless(QObject):
         self._password = secrets.token_hex(4)
         self._remote = remote_args(device_id)
         self._phase = "mount"
+        if os.environ.get("IPHONE_MIRROR_DIAGNOSTICS") == "1":
+            self.diagnostic_timer.start()
         self.deadline.start(300000)
         self._set_state(STARTING, "Preparing the paired iPhone…")
         self._run(["mounter", "auto-mount", *self._remote])
@@ -337,6 +356,7 @@ class DesktopWireless(QObject):
         self.start(self._device_id, retry=True)
 
     def _stop(self, state, message=""):
+        self.diagnostic_timer.stop()
         self.deadline.stop()
         self.retry_timer.stop()
         self._cancel_scroll()
