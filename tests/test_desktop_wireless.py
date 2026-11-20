@@ -6,6 +6,10 @@ import sys
 import tempfile
 import time
 import unittest
+from types import SimpleNamespace
+
+import av
+import numpy as np
 from pathlib import Path
 from unittest.mock import patch
 
@@ -19,6 +23,7 @@ from PySide6.QtWidgets import QApplication
 
 from iphone_mirror.config import Settings
 from iphone_mirror.ui import PhoneWindow
+from iphone_mirror.wireless_backend import emit_packed_frame, present_desktop_frame
 
 SIMULATED_VIEWER = """\
 import asyncio
@@ -52,6 +57,37 @@ async def main():
 
 asyncio.run(main())
 """
+
+
+class PackedFrameTest(unittest.TestCase):
+    def test_desktop_frame_rotation_and_transport_size(self):
+        pixels = np.zeros((2556, 1179, 4), dtype=np.uint8)
+        pixels[:, :, 3] = 255
+        for rotation in (0, 90, 180, 270):
+            viewer = SimpleNamespace(_rotation=rotation, _display_size=(1179, 2556))
+            data, width, height, angle = present_desktop_frame(viewer, pixels.tobytes(), 1179, 2556)
+            self.assertLessEqual(max(width, height), 1440)
+            self.assertEqual(len(data), width * height * 4)
+            self.assertEqual(angle, rotation)
+            self.assertEqual(width < height, rotation in (0, 180))
+
+    def test_iphone_width_removes_ffmpeg_stride_padding(self):
+        for width in (1080, 1179, 1180):
+            with self.subTest(width=width):
+                images = []
+                target = SimpleNamespace(width=width, height=240, _on_frame=images.append)
+                for value in (20, 100):
+                    source = av.VideoFrame.from_ndarray(
+                        np.full((240, width, 3), value, dtype=np.uint8), format="rgb24"
+                    )
+                    emit_packed_frame(target, source)
+                self.assertEqual(len(images[0]), width * 240 * 4)
+                self.assertEqual(len(images[1]), width * 240 * 4)
+                first = np.frombuffer(images[0], np.uint8).reshape(240, width, 4)
+                last = np.frombuffer(images[1], np.uint8).reshape(240, width, 4)
+                self.assertTrue(np.all(first[:, :, :3] == 20))
+                self.assertTrue(np.all(last[:, :, :3] == 100))
+                self.assertTrue(np.all(last[:, :, 3] == 255))
 
 
 @unittest.skipUnless(importlib.util.find_spec("pymobiledevice3"), "Wireless control dependencies are not installed")
@@ -158,7 +194,11 @@ class DesktopWirelessTest(unittest.TestCase):
                     self.assertLess(int(swipe[-1][3]), int(swipe[0][3]))
 
                     old_process = bridge.process.processId()
-                    bridge.process.kill()
+                    # The server remains alive and accepts input, but stops sending pictures.
+                    bridge.touch(0.5, 0.5, True)
+                    bridge.touch(0.5, 0.5, False)
+                    bridge._waiting_for_picture = time.monotonic() - 9
+                    bridge._check_picture()
                     self.wait_for(
                         lambda: bridge.ready and bridge.process.processId() != old_process,
                         "Desktop did not reconnect after the viewer exited", timeout=10,

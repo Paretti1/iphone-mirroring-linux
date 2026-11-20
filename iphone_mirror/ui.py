@@ -144,7 +144,9 @@ class PhoneWindow(QWidget):
         self.drag_offset = None
         self.fps = 0.0
         self._frames = 0
-        self._fps_t = time.time()
+        self._fps_t = time.monotonic()
+        self._fps_timer = QTimer(self, interval=1000, timeout=self._update_fps)
+        self._fps_timer.start()
         self._hide_bar = QTimer(self, singleShot=True, interval=1200, timeout=self._bar_off)
         self._hover_btn = None
         self._hint_text = ""
@@ -314,11 +316,14 @@ class PhoneWindow(QWidget):
             self.state = "mirroring"
             self._update_wireless_button()
         self._frames += 1
-        now = time.time()
-        if now - self._fps_t >= 1:
-            self.fps = self._frames / (now - self._fps_t)
-            self._frames, self._fps_t = 0, now
         self.update()
+
+    def _update_fps(self):
+        now = time.monotonic()
+        self.fps = self._frames / max(0.001, now - self._fps_t)
+        self._frames, self._fps_t = 0, now
+        if self.state == "mirroring":
+            self._update_toolbar()
 
     def on_event(self, event, info):
         log.debug("ui event %s %s", event, info)
@@ -666,7 +671,7 @@ class PhoneWindow(QWidget):
         if self._hint_text and time.monotonic() < self._hint_until:
             return [self._hint_text]
         name = self.client or "iPhone"
-        fps = f"{self.fps:.0f} fps" if self.state == "mirroring" and self.fps else ""
+        fps = f"{self.fps:.0f} fps" if self.state == "mirroring" else ""
         status = self._control_status()
         sep = "  ·  "
         labels = [sep.join(x for x in (name, fps, status) if x)]
