@@ -195,6 +195,10 @@ grep 'WIRELESS_DIAG' "${XDG_STATE_HOME:-$HOME/.local/state}/iphone-mirroring-lin
 These counters distinguish device or transport stalls from decoder and desktop
 display stalls. A synthetic HEVC test cannot verify a physical iPhone's stream.
 
+The desktop starts its installed video backend in isolated Python mode. Launching
+the app from an older source checkout cannot silently load that checkout's backend.
+Diagnostic mode also logs the backend's own version and module path at startup.
+
 - Settings are in `${XDG_CONFIG_HOME:-~/.config}/iphone-mirroring-linux/settings.json`. The file includes `name`, `height`, `width`, `fps`, `audio`, and `always_on_top`. Quit before editing. The default request is 1080p at 60 fps. The actual stream depends on the phone and network.
 - Logs are in `${XDG_STATE_HOME:-~/.local/state}/iphone-mirroring-linux/`. The **Open Log** menu item opens the app log.
 - Screenshots are saved in **Pictures → iPhone Mirroring Linux** using the desktop’s configured Pictures folder.

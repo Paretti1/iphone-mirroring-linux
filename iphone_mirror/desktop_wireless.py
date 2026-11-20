@@ -273,7 +273,9 @@ class DesktopWireless(QObject):
         self._pending_output = b""
         self._last_output = ""
         module = "iphone_mirror.wireless_backend" if self._phase == "serve" else "pymobiledevice3"
-        self.process.start(sys.executable, ["-u", "-m", module, *args])
+        # An older checkout in the launch folder must never replace the installed
+        # backend. Isolated mode also ignores a stale PYTHONPATH and user site.
+        self.process.start(sys.executable, ["-I", "-u", "-m", module, *args])
 
     def _read_process(self):
         data = self._pending_output + bytes(self.process.readAllStandardOutput())

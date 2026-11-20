@@ -5,6 +5,8 @@ import contextlib
 import logging
 import os
 import runpy
+import sys
+from importlib.metadata import version
 
 import av
 import numpy as np
@@ -154,6 +156,12 @@ def configure_backend():
 
 
 def main():
+    if os.environ.get("IPHONE_MIRROR_DIAGNOSTICS") == "1":
+        print(
+            f"WIRELESS_DIAG backend_boot version={version('iphone-mirroring-linux')} "
+            f"isolated={sys.flags.isolated} source={__file__}",
+            flush=True,
+        )
     configure_backend()
     runpy.run_module("pymobiledevice3", run_name="__main__")
 

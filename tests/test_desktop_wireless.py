@@ -16,12 +16,13 @@ from unittest.mock import patch
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from PySide6.QtCore import QPoint, QPointF, Qt
+from PySide6.QtCore import QPoint, QPointF, QProcess, Qt
 from PySide6.QtGui import QWheelEvent
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
 from iphone_mirror.config import Settings
+from iphone_mirror.desktop_wireless import DesktopWireless
 from iphone_mirror.ui import PhoneWindow
 from iphone_mirror.wireless_backend import emit_packed_frame, present_desktop_frame
 
@@ -160,6 +161,34 @@ class DesktopWirelessTest(unittest.TestCase):
                 return
             QTest.qWait(20)
         self.fail(message)
+
+    @patch.dict(os.environ, {"IPHONE_MIRROR_DIAGNOSTICS": "1"})
+    def test_backend_uses_installed_package_from_an_old_source_folder(self):
+        app = QApplication.instance() or QApplication([])
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory)
+            for name in ("old-source", "pythonpath"):
+                package = folder / name / "iphone_mirror"
+                package.mkdir(parents=True)
+                (package / "__init__.py").write_text("")
+                (package / "wireless_backend.py").write_text('print("STALE_BACKEND")')
+            backend = DesktopWireless()
+            backend.process.setWorkingDirectory(str(folder / "old-source"))
+            backend._phase = "serve"
+            try:
+                with (
+                    patch.dict(os.environ, {"PYTHONPATH": str(folder / "pythonpath")}),
+                    self.assertLogs("iphone_mirror.desktop_wireless", level="INFO") as records,
+                ):
+                    backend._run(["--help"])
+                    self.wait_for(lambda: backend.process.state() == QProcess.NotRunning, "Backend command did not finish", timeout=15)
+                output = "\n".join(records.output)
+                self.assertNotIn("STALE_BACKEND", output)
+                self.assertIn("WIRELESS_DIAG backend_boot", output)
+                self.assertIn("isolated=1", output)
+            finally:
+                backend.shutdown()
+                app.processEvents()
 
     @patch.dict(os.environ, {"IPHONE_MIRROR_DIAGNOSTICS": "1"})
     def test_hevc_video_keeps_updating_while_input_is_sent(self):
