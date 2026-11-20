@@ -22,8 +22,8 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
 from iphone_mirror.config import Settings
-from iphone_mirror.desktop_wireless import DesktopWireless
-from iphone_mirror.ui import PhoneWindow
+from iphone_mirror.desktop_wireless import DesktopWireless, FramebufferClient
+from iphone_mirror.ui import PhoneWindow, SHADOW, BAR
 from iphone_mirror.wireless_backend import present_desktop_frame
 from iphone_mirror.realtime_hevc import RealtimeHevcDecoder
 
@@ -162,6 +162,102 @@ class DesktopWirelessTest(unittest.TestCase):
                 return
             QTest.qWait(20)
         self.fail(message)
+
+    def test_video_presents_on_the_next_event_loop_turn(self):
+        app = QApplication.instance() or QApplication([])
+        client = FramebufferClient()
+        displayed = []
+        client.frame.connect(lambda *frame: displayed.append(frame))
+        pixels = np.zeros((16, 8, 4), np.uint8)
+        client._latest_frame = (pixels, 8, 16)
+        client.present_timer.start()
+        app.processEvents()
+        self.assertEqual(len(displayed), 1, "Video waited an extra frame interval before display")
+        client.close()
+
+    def test_border_drag_resizes_without_sending_phone_input_and_remembers_size(self):
+        app = QApplication.instance() or QApplication([])
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "settings.json"
+            window = PhoneWindow(Settings(path), None)
+            window.show()
+            app.processEvents()
+            window._display_frame(np.zeros((255, 118, 4), np.uint8), 118, 255)
+            window.setGeometry(200, 100, 400, 500)
+            window.wireless.state = "ready"
+            app.processEvents()
+            try:
+                start = QPoint(window.width() - 2, window.height() - 2)
+                self.assertEqual(window._resize_edges(start), Qt.RightEdge | Qt.BottomEdge)
+                with (
+                    patch.object(window.windowHandle(), "startSystemResize", return_value=False),
+                    patch.object(window.wireless, "touch") as touch,
+                ):
+                    QTest.mousePress(window, Qt.LeftButton, pos=start)
+                    QTest.mouseMove(window, start + QPoint(70, 90))
+                    QTest.mouseRelease(window, Qt.LeftButton, pos=start + QPoint(70, 90))
+                    app.processEvents()
+                    self.assertEqual((window.width(), window.height()), (470, 590))
+                    touch.assert_not_called()
+                rect = window.phone_rect()
+                self.assertAlmostEqual(rect.width() / rect.height(), window.aspect, delta=0.005)
+                self.assertTrue(window.rect().contains(rect.toRect()))
+                self.assertGreaterEqual(rect.top(), SHADOW + BAR)
+                window._save_pos()
+            finally:
+                window.wireless.shutdown()
+                window.close()
+            restored = PhoneWindow(Settings(path), None)
+            try:
+                self.assertEqual((restored.width(), restored.height()), (470, 590))
+                self.assertGreater(restored.maximumWidth(), restored.minimumWidth())
+            finally:
+                restored.close()
+
+    def test_resize_edges_keep_opposite_side_and_enforce_minimum_size(self):
+        app = QApplication.instance() or QApplication([])
+        with tempfile.TemporaryDirectory() as directory:
+            window = PhoneWindow(Settings(Path(directory) / "settings.json"), None)
+            window.show()
+            try:
+                for aspect in (0.46, 2.16):
+                    window.aspect = aspect
+                    window.setGeometry(200, 100, 400, 500)
+                    app.processEvents()
+                    original = window.geometry()
+                    self.assertEqual(window._resize_edges(QPoint(2, 2)), Qt.TopEdge | Qt.LeftEdge)
+                    window._resize_drag = (Qt.LeftEdge | Qt.TopEdge, QPoint(0, 0), original)
+                    window._drag_resize(QPoint(10000, 10000))
+                    self.assertEqual(window.width(), window.minimumWidth())
+                    self.assertEqual(window.height(), window.minimumHeight())
+                    self.assertEqual(window.geometry().bottomRight(), original.bottomRight())
+                    self.assertTrue(window.rect().contains(window.phone_rect().toRect()))
+            finally:
+                window._resize_drag = None
+                window.close()
+
+    def test_wireless_wheel_batch_is_short_and_quality_is_saved(self):
+        app = QApplication.instance() or QApplication([])
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "settings.json"
+            window = PhoneWindow(Settings(path), None)
+            window.show()
+            window.wireless.state = "ready"
+            window._display_frame(np.zeros((160, 80, 4), np.uint8), 80, 160)
+            try:
+                center = window.phone_rect().center()
+                wheel = QWheelEvent(center, QPointF(window.mapToGlobal(center.toPoint())),
+                                    QPoint(), QPoint(0, -120), Qt.NoButton, Qt.NoModifier, Qt.NoScrollPhase, False)
+                with patch.object(window.wireless, "scroll") as scroll:
+                    QApplication.sendEvent(window, wheel)
+                    self.assertLessEqual(window._wheel_timer.interval(), 16)
+                    self.wait_for(lambda: scroll.called, "Mouse wheel input was not sent")
+                window._set_wireless_quality(720)
+                self.assertEqual(Settings(path).get("wireless_preview_edge"), 720)
+                self.assertEqual(window.wireless.preview_edge, 720)
+            finally:
+                window.wireless.shutdown()
+                window.close()
 
     @patch.dict(os.environ, {"IPHONE_MIRROR_DIAGNOSTICS": "1"})
     def test_backend_uses_installed_package_from_an_old_source_folder(self):

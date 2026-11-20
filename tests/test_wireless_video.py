@@ -20,7 +20,7 @@ from pymobiledevice3.remote.core_device.vnc_server import VncStreamServer
 from iphone_mirror.wireless_backend import (
     diagnostic_receiver, diagnostic_transcoder, request_software_keyframe, FrameMailbox,
 )
-from iphone_mirror.realtime_hevc import MAX_QUEUED_PACKETS, RealtimeHevcDecoder
+from iphone_mirror.realtime_hevc import MAX_QUEUED_PACKETS, RealtimeHevcDecoder, preview_edge
 
 
 def encoded_frames(count=20, width=160, height=320):
@@ -140,6 +140,7 @@ class RealtimeDecoderTest(unittest.TestCase):
             release.set()
             decoder.close()
 
+    @patch.dict("os.environ", {"IPHONE_MIRROR_PREVIEW_EDGE": "1080"})
     def test_resize_happens_before_bgra_packing(self):
         packets = encoded_frames(count=1, width=1184, height=2560)
         received = []
@@ -147,11 +148,16 @@ class RealtimeDecoderTest(unittest.TestCase):
         try:
             decoder.feed(packets[0])
             self.wait_for(lambda: received)
-            self.assertEqual(max(decoder.width, decoder.height), 1440)
+            self.assertEqual(max(decoder.width, decoder.height), 1080)
             self.assertEqual(len(received[0]), decoder.width * decoder.height * 4)
             self.assertTrue(np.all(np.frombuffer(received[0], np.uint8)[3::4] == 255))
         finally:
             decoder.close()
+
+    def test_quality_choices_are_bounded(self):
+        for setting, expected in (("720", 720), ("1080", 1080), ("1440", 1440), ("bad", 1080), ("99999", 1080)):
+            with patch.dict("os.environ", {"IPHONE_MIRROR_PREVIEW_EDGE": setting}):
+                self.assertEqual(preview_edge(), expected)
 
 
 class WirelessVideoTest(unittest.IsolatedAsyncioTestCase):

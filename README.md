@@ -8,7 +8,7 @@ Mirror your iPhone in a compact desktop window on Fedora and other Linux distrib
 | AirPlay with an existing WebDriverAgent | Wi-Fi from Control Center, with sound | Wi-Fi while your explicitly selected WebDriverAgent is running |
 | Developer Wi-Fi viewer | Direct Wi-Fi in the desktop app | Direct Wi-Fi with iOS 27+, Developer Mode, and one-time pairing |
 
-The desktop AirPlay window includes rotation, a floating pin, adjustable sizing, remembered geometry where the desktop supports it, screenshots, mute, and a single running instance. Its design follows the upstream project's compact phone-shaped window. The separate developer Wi-Fi viewer uses iOS's developer display and input services. Apple’s [macOS iPhone Mirroring](https://support.apple.com/en-us/120421) uses its own Apple Account integration. AirPlay on Linux requires you to start Screen Mirroring on the iPhone, and pauses when the iPhone locks.
+The desktop AirPlay window includes rotation, a floating pin, draggable resize edges and corners, remembered geometry where the desktop supports it, screenshots, mute, and a single running instance. The phone image stays in proportion inside the resized window. Its design follows the upstream project's compact phone-shaped window. The separate developer Wi-Fi viewer uses iOS's developer display and input services. Apple’s [macOS iPhone Mirroring](https://support.apple.com/en-us/120421) uses its own Apple Account integration. AirPlay on Linux requires you to start Screen Mirroring on the iPhone, and pauses when the iPhone locks.
 
 ## Install on Linux
 
@@ -161,8 +161,30 @@ A USB-started XCTest runner usually ends when the underlying test connection clo
 
 ## Desktop controls
 
+Drag any outside edge or corner to resize the window. The app uses the desktop's
+native resize interaction when available, with a manual fallback. The image fits
+the available space without stretching, and the toolbar stays accessible.
+
+Right-click → **Wi-Fi video quality** offers **Fast (720 px)**, **Smooth (1080 px,
+default)**, and **Sharp (1440 px)**, measured along the image's long edge. Reconnect
+Wi-Fi after changing quality. Smooth reduces local raw-video bandwidth by about
+44% compared with Sharp. It targets fluid playback on laptop CPUs; 60 FPS is not
+guaranteed. Video is presented on the next event-loop turn, and Wi-Fi wheel input
+uses a 12 ms batch instead of the USB backend's 120 ms batch.
+
+### Can the iPhone stay asleep or locked?
+
+The current Linux developer display backend does not provide app control while
+the iPhone is asleep or locked. Its capture pipeline stops when iOS sleeps the
+display, as documented in the [upstream keep-awake implementation](https://github.com/doronz88/pymobiledevice3/blob/v11.61.0/pymobiledevice3/remote/core_device/screen_stream.py#L3076).
+Keep the iPhone awake and unlocked during a session. The app does not
+bypass the lock screen or provide Apple's separate locked-device Continuity
+mirroring mode. Reducing brightness is possible on the phone, but it does not
+turn the display off or lock the device.
+
 | Input | Result |
 | --- | --- |
+| Drag an outside edge or corner | Resize the window while preserving the phone image's proportions |
 | Drag the window or top bar | Move the window. With USB/WDA control active, use the top bar or Alt+drag |
 | Double-click in mirroring-only mode | Switch between large and normal sizes |
 | Ctrl+wheel, Ctrl+Plus, Ctrl+Minus | Resize the mirror |

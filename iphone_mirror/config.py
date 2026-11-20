@@ -49,6 +49,9 @@ DEFAULTS = {
     "x": None,
     "y": None,
     "phone_height": 0,
+    "window_width": 0,
+    "window_height": 0,
+    "wireless_preview_edge": 1080,
     # identity, generated on first start
     "mac": "",
     "ed25519_seed": "",

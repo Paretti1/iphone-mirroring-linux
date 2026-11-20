@@ -11,7 +11,7 @@ import time
 import numpy as np
 from cryptography.hazmat.decrepit.ciphers.algorithms import TripleDES
 from cryptography.hazmat.primitives.ciphers import Cipher, modes
-from PySide6.QtCore import QObject, QProcess, QTimer, Qt, Signal
+from PySide6.QtCore import QObject, QProcess, QProcessEnvironment, QTimer, Qt, Signal
 from PySide6.QtNetwork import QAbstractSocket, QTcpSocket
 
 from .control import ERROR, OFF, READY, STARTING
@@ -59,7 +59,9 @@ class FramebufferClient(QObject):
         )
         self.drain_timer = QTimer(self, singleShot=True, interval=0)
         self.drain_timer.timeout.connect(self._read)
-        self.present_timer = QTimer(self, singleShot=True, interval=16)
+        # Coalesce packets within this event-loop turn, then present immediately.
+        # A 16 ms single-shot adds latency and can turn a 60 Hz stream into 30 Hz.
+        self.present_timer = QTimer(self, singleShot=True, interval=0)
         self.present_timer.timeout.connect(self._present)
         self._latest_frame = None
         self.socket.errorOccurred.connect(lambda _: self._fail(self.socket.errorString()))
@@ -169,6 +171,7 @@ class FramebufferClient(QObject):
             px = min(self.width - 1, max(0, round(x * (self.width - 1))))
             py = min(self.height - 1, max(0, round(y * (self.height - 1))))
             self.socket.write(struct.pack(">BBHH", 5, int(pressed), px, py))
+            self.socket.flush()
 
     def key_tap(self, keysym, ctrl=False):
         def key(symbol, down):
@@ -179,6 +182,7 @@ class FramebufferClient(QObject):
             packet = key(CONTROL_KEY, True) + packet + key(CONTROL_KEY, False)
         if self.width and self.height:
             self.socket.write(packet)
+            self.socket.flush()
 
 
 class DesktopWireless(QObject):
@@ -202,7 +206,8 @@ class DesktopWireless(QObject):
         self.deadline.timeout.connect(lambda: self._fail("Timed out waiting for the iPhone. Keep it awake and retry."))
         self.kill_timer = QTimer(self, singleShot=True, interval=5000)
         self.kill_timer.timeout.connect(self.process.kill)
-        self.scroll_timer = QTimer(self, interval=20)
+        self.scroll_timer = QTimer(self, interval=12)
+        self.scroll_timer.setTimerType(Qt.PreciseTimer)
         self.scroll_timer.timeout.connect(self._scroll_step)
         self._scroll_points = iter(())
         self._scroll_position = None
@@ -213,6 +218,7 @@ class DesktopWireless(QObject):
         self._password = ""
         self._remote = []
         self._device_id = None
+        self.preview_edge = 1080
         self._retries = 0
         self._stats_started = time.monotonic()
         self._received_frames = 0
@@ -273,6 +279,9 @@ class DesktopWireless(QObject):
         self._pending_output = b""
         self._last_output = ""
         module = "iphone_mirror.wireless_backend" if self._phase == "serve" else "pymobiledevice3"
+        environment = QProcessEnvironment.systemEnvironment()
+        environment.insert("IPHONE_MIRROR_PREVIEW_EDGE", str(self.preview_edge))
+        self.process.setProcessEnvironment(environment)
         # An older checkout in the launch folder must never replace the installed
         # backend. Isolated mode also ignores a stale PYTHONPATH and user site.
         self.process.start(sys.executable, ["-I", "-u", "-m", module, *args])

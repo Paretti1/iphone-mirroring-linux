@@ -15,10 +15,11 @@ from pathlib import Path
 from uuid import uuid4
 
 from PySide6.QtCore import (
-    QEvent, QObject, QPoint, QPointF, QRectF, QStandardPaths, Qt, QTimer, QUrl, Signal,
+    QEvent, QObject, QPoint, QPointF, QRect, QRectF, QStandardPaths, Qt, QTimer, QUrl, Signal,
 )
 from PySide6.QtGui import (
     QAction,
+    QActionGroup,
     QBrush,
     QColor,
     QDesktopServices,
@@ -131,6 +132,9 @@ class PhoneWindow(QWidget):
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.StrongFocus)
         self._wireless_touch = None
+        self._resize_drag = None
+        self._layout_busy = False
+        self._geometry_timer = QTimer(self, singleShot=True, interval=250, timeout=self._save_pos)
         self._apply_flags()
 
         self.image = None  # QImage of the current frame (device pixels)
@@ -173,6 +177,7 @@ class PhoneWindow(QWidget):
         self._anim = QTimer(self, interval=16, timeout=self._tick)
 
         self.wireless = DesktopWireless(self)
+        self.wireless.preview_edge = settings.get("wireless_preview_edge", 1080)
         self.wireless.frame.connect(self._display_frame)
         self.wireless.state_changed.connect(self._on_wireless_state)
         self.wireless_device = wireless_device or settings.get("wireless_device")
@@ -219,8 +224,12 @@ class PhoneWindow(QWidget):
 
         screen = QApplication.primaryScreen().availableGeometry()
         ph = int(settings.get("phone_height") or 0) or int(screen.height() * 0.72)
+        saved_size = (int(settings.get("window_width") or 0), int(settings.get("window_height") or 0))
         self.phone_h = max(320, min(ph, screen.height() - BAR - 2 * SHADOW))
+        self.setMinimumSize(300, BAR + 2 * SHADOW + 160)
         self._relayout(keep_center=False)
+        if min(saved_size) > 0:
+            self.resize(min(saved_size[0], screen.width()), min(saved_size[1], screen.height()))
         x, y = settings.get("x"), settings.get("y")
         if x is not None and y is not None:
             c = QPoint(int(x) + self.width() // 2, int(y) + self.height() // 2)
@@ -243,6 +252,12 @@ class PhoneWindow(QWidget):
         self.setWindowFlags(flags)
 
     def phone_size(self):
+        available_w = max(1, self.width() - 2 * SHADOW)
+        available_h = max(1, self.height() - BAR - 2 * SHADOW)
+        h = min(available_h, available_w / self.aspect)
+        return round(h * self.aspect), round(h)
+
+    def _desired_phone_size(self):
         if self.aspect <= 1:  # portrait: height is the reference
             h = self.phone_h
             w = round(h * self.aspect)
@@ -253,16 +268,19 @@ class PhoneWindow(QWidget):
 
     def phone_rect(self) -> QRectF:
         w, h = self.phone_size()
-        return QRectF((self.width() - w) / 2, SHADOW + BAR, w, h)
+        available_h = self.height() - BAR - 2 * SHADOW
+        return QRectF((self.width() - w) / 2, SHADOW + BAR + (available_h - h) / 2, w, h)
 
     def corner_radius(self) -> float:
         w, h = self.phone_size()
         return min(w, h) * 0.135
 
     def _relayout(self, keep_center=True):
-        w, h = self.phone_size()
+        w, h = self._desired_phone_size()
         center = self.geometry().center()
-        self.setFixedSize(max(300, w + 2 * SHADOW), h + 2 * SHADOW + BAR)
+        self._layout_busy = True
+        self.resize(max(300, w + 2 * SHADOW), h + 2 * SHADOW + BAR)
+        self._layout_busy = False
         self._toolbar.setGeometry(SHADOW, SHADOW, self.width() - 2 * SHADOW, BAR - 8)
         if keep_center and not self._native_wayland:
             g = self.geometry()
@@ -271,6 +289,55 @@ class PhoneWindow(QWidget):
         self._update_target()
         self._update_wireless_button()
         self.update()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if not hasattr(self, "_toolbar"):
+            return
+        self._toolbar.setGeometry(SHADOW, SHADOW, self.width() - 2 * SHADOW, BAR - 8)
+        if not self._layout_busy:
+            self.phone_h = max(self.phone_size())
+            self.settings["phone_height"] = self.phone_h
+            self.settings["window_width"] = self.width()
+            self.settings["window_height"] = self.height()
+            self._geometry_timer.start()
+        self._update_target()
+        self._update_wireless_button()
+        self.update()
+
+    def _resize_edges(self, pos):
+        edges = Qt.Edge(0)
+        if self.isMaximized() or self.isFullScreen():
+            return edges
+        if pos.x() < SHADOW:
+            edges |= Qt.LeftEdge
+        elif pos.x() >= self.width() - SHADOW:
+            edges |= Qt.RightEdge
+        if pos.y() < SHADOW:
+            edges |= Qt.TopEdge
+        elif pos.y() >= self.height() - SHADOW:
+            edges |= Qt.BottomEdge
+        return edges
+
+    def _start_resize(self, edges, event):
+        window = self.windowHandle()
+        if window is not None and window.startSystemResize(edges):
+            return
+        self._resize_drag = (edges, event.globalPosition().toPoint(), QRect(self.geometry()))
+
+    def _drag_resize(self, global_pos):
+        edges, origin, original = self._resize_drag
+        delta = global_pos - origin
+        rect = QRect(original)
+        if edges & Qt.LeftEdge:
+            rect.setLeft(min(original.left() + delta.x(), original.right() - self.minimumWidth() + 1))
+        if edges & Qt.RightEdge:
+            rect.setRight(max(original.right() + delta.x(), original.left() + self.minimumWidth() - 1))
+        if edges & Qt.TopEdge:
+            rect.setTop(min(original.top() + delta.y(), original.bottom() - self.minimumHeight() + 1))
+        if edges & Qt.BottomEdge:
+            rect.setBottom(max(original.bottom() + delta.y(), original.top() + self.minimumHeight() - 1))
+        self.setGeometry(rect)
 
     def _update_target(self):
         if self.rx is None:
@@ -860,6 +927,17 @@ class PhoneWindow(QWidget):
             self.ctrl.type_text(text)
 
     def _update_cursor(self, pos):
+        edges = self._resize_edges(pos)
+        if edges:
+            if edges in (Qt.LeftEdge, Qt.RightEdge):
+                self.setCursor(Qt.SizeHorCursor)
+            elif edges in (Qt.TopEdge, Qt.BottomEdge):
+                self.setCursor(Qt.SizeVerCursor)
+            elif edges in (Qt.TopEdge | Qt.LeftEdge, Qt.BottomEdge | Qt.RightEdge):
+                self.setCursor(Qt.SizeFDiagCursor)
+            else:
+                self.setCursor(Qt.SizeBDiagCursor)
+            return
         touch = (
             self._gestures_on()
             and self.phone_rect().contains(pos)
@@ -885,6 +963,8 @@ class PhoneWindow(QWidget):
     def event(self, e):
         if e.type() == QEvent.WindowDeactivate:
             self._release_wireless_pointer()
+            self._resize_drag = None
+            self.drag_offset = None
         if e.type() == QEvent.KeyPress and e.key() == Qt.Key_Tab and self.wireless.ready:
             if not e.modifiers() and self.wireless.key(e):
                 return True
@@ -913,6 +993,10 @@ class PhoneWindow(QWidget):
         if e.button() != Qt.LeftButton:
             return
         pos = e.position()
+        edges = self._resize_edges(pos)
+        if edges:
+            self._start_resize(edges, e)
+            return
         if self.hover:
             name = self._button_at(pos)
             if name:
@@ -935,6 +1019,9 @@ class PhoneWindow(QWidget):
 
     def mouseMoveEvent(self, e):
         pos = e.position()
+        if self._resize_drag is not None:
+            self._drag_resize(e.globalPosition().toPoint())
+            return
         if self._wireless_touch is not None:
             now = time.monotonic()
             if now - self._wireless_motion_time >= 0.015:
@@ -962,6 +1049,10 @@ class PhoneWindow(QWidget):
 
     def mouseReleaseEvent(self, e):
         if e.button() != Qt.LeftButton:
+            return
+        if self._resize_drag is not None:
+            self._resize_drag = None
+            self._save_pos()
             return
         if self._wireless_touch is not None:
             self._wireless_pointer(e.position(), False)
@@ -1010,7 +1101,7 @@ class PhoneWindow(QWidget):
         if dy and self._gestures_on() and self.phone_rect().contains(e.position()):
             if not self._wheel_timer.isActive():
                 self._wheel_pos = to_fraction(self.phone_rect(), e.position())
-                self._wheel_timer.start()
+                self._wheel_timer.start(12 if self.wireless.ready else WHEEL_BATCH_MS)
             self._wheel_acc += dy / 120  # > 0: wheel rotated away from the user
 
     def keyPressEvent(self, e):
@@ -1087,6 +1178,13 @@ class PhoneWindow(QWidget):
         screen = (self.screen() or QApplication.primaryScreen()).availableGeometry()
         for label, k in (("Small", 0.5), ("Medium", 0.72), ("Large", 0.92)):
             size.addAction(label, lambda k=k: self.set_phone_height(screen.height() * k))
+        quality = m.addMenu("Wi-Fi video quality")
+        group = QActionGroup(quality)
+        for label, edge in (("Fast · 720 px", 720), ("Smooth · 1080 px", 1080), ("Sharp · 1440 px", 1440)):
+            action = QAction(label, quality, checkable=True, checked=self.wireless.preview_edge == edge)
+            group.addAction(action)
+            action.triggered.connect(lambda checked=False, edge=edge: self._set_wireless_quality(edge))
+            quality.addAction(action)
         m.addSeparator()
         m.addAction("Save Screenshot\tCtrl+S", self.screenshot)
         m.addAction("Receiver Name…", self._rename)
@@ -1094,6 +1192,13 @@ class PhoneWindow(QWidget):
         m.addSeparator()
         m.addAction("Quit\tCtrl+Q", QApplication.quit)
         m.exec(e.globalPos())
+
+    def _set_wireless_quality(self, edge):
+        self.wireless.preview_edge = edge
+        self.settings["wireless_preview_edge"] = edge
+        self.settings.save()
+        if self.wireless.active:
+            self._hint("Video quality saved. Reconnect Wi-Fi to apply.")
 
     def _button(self, name):
         if name == "close":
@@ -1173,6 +1278,9 @@ class PhoneWindow(QWidget):
             self._hint("Screenshot could not be saved")
 
     def _save_pos(self):
+        self.settings["window_width"] = self.width()
+        self.settings["window_height"] = self.height()
+        self.settings["phone_height"] = max(self.phone_size())
         if not self._native_wayland:
             self.settings["x"], self.settings["y"] = self.x(), self.y()
         self.settings.save()

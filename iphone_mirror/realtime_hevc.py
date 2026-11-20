@@ -14,6 +14,14 @@ MAX_DISPLAY_EDGE = 1440
 MAX_QUEUED_PACKETS = 12
 
 
+def preview_edge():
+    try:
+        edge = int(os.environ.get("IPHONE_MIRROR_PREVIEW_EDGE", "1080"))
+    except ValueError:
+        return 1080
+    return edge if edge in (720, 1080, 1440) else 1080
+
+
 def is_keyframe(packet):
     """Find an HEVC random access NAL in an Annex-B access unit."""
     start = 0
@@ -42,7 +50,7 @@ class RealtimeHevcDecoder:
         self.source_height = state.pic_height_in_luma_samples
         if min(self.source_width, self.source_height) <= 0:
             raise ValueError("Invalid HEVC display size")
-        scale = min(1.0, MAX_DISPLAY_EDGE / max(self.source_width, self.source_height))
+        scale = min(1.0, preview_edge() / max(self.source_width, self.source_height))
         self.width = max(1, round(self.source_width * scale))
         self.height = max(1, round(self.source_height * scale))
         self._parameter_sets = b"".join(b"\x00\x00\x00\x01" + nal for nal in (vps, sps, pps))
