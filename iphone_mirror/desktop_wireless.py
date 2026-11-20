@@ -80,14 +80,6 @@ class FramebufferClient(QObject):
         self.width = self.height = 0
         self.socket.abort()
 
-    def _expect_picture(self):
-        if self.ready and self._waiting_for_picture is None:
-            self._waiting_for_picture = time.monotonic()
-
-    def _check_picture(self):
-        if self._waiting_for_picture is not None and time.monotonic() - self._waiting_for_picture > 8:
-            self._fail("The iPhone accepted input but video stopped updating. Restarting the video stream.")
-
     def _fail(self, message):
         if self._messages is not None:
             self.close()
@@ -216,9 +208,8 @@ class DesktopWireless(QObject):
         self._remote = []
         self._device_id = None
         self._retries = 0
-        self._waiting_for_picture = None
-        self.picture_timer = QTimer(self, interval=1000)
-        self.picture_timer.timeout.connect(self._check_picture)
+        self._stats_started = time.monotonic()
+        self._received_frames = 0
         self.retry_timer = QTimer(self, singleShot=True, interval=2000)
         self.retry_timer.timeout.connect(self._retry)
 
@@ -289,6 +280,8 @@ class DesktopWireless(QObject):
             return
         if self._phase == "mount" and code == 0 and status == QProcess.NormalExit:
             self._phase = "serve"
+            self._stats_started = time.monotonic()
+            self._received_frames = 0
             self.deadline.start(45000)
             self._set_state(STARTING, "Connecting to the iPhone display…")
             self._run([
@@ -306,20 +299,17 @@ class DesktopWireless(QObject):
 
     def _frame(self, data, width, height):
         if self.active:
-            self._waiting_for_picture = None
+            self._received_frames += 1
+            now = time.monotonic()
+            elapsed = now - self._stats_started
+            if elapsed >= 5:
+                log.info("Wireless video received %.1f fps (%dx%d)", self._received_frames / elapsed, width, height)
+                self._received_frames = 0
+                self._stats_started = now
             if not self.ready:
                 self.deadline.stop()
-                self.picture_timer.start()
                 self._set_state(READY)
             self.frame.emit(data, width, height)
-
-    def _expect_picture(self):
-        if self.ready and self._waiting_for_picture is None:
-            self._waiting_for_picture = time.monotonic()
-
-    def _check_picture(self):
-        if self._waiting_for_picture is not None and time.monotonic() - self._waiting_for_picture > 8:
-            self._fail("The iPhone accepted input but video stopped updating. Restarting the video stream.")
 
     def _fail(self, message):
         if not self.active or self._phase == "retry":
@@ -348,8 +338,6 @@ class DesktopWireless(QObject):
 
     def _stop(self, state, message=""):
         self.deadline.stop()
-        self.picture_timer.stop()
-        self._waiting_for_picture = None
         self.retry_timer.stop()
         self._cancel_scroll()
         self.client.close()
@@ -369,12 +357,10 @@ class DesktopWireless(QObject):
             self.process.waitForFinished(1000)
 
     def touch(self, x, y, pressed):
-        self._expect_picture()
         self._cancel_scroll()
         self.client.pointer(x, y, pressed)
 
     def scroll(self, x, y, notches):
-        self._expect_picture()
         self._cancel_scroll()
         # A vertical touch swipe works with apps that expect finger gestures.
         distance = min(0.65, max(0.18, abs(notches) * 0.26))
@@ -409,7 +395,6 @@ class DesktopWireless(QObject):
         if keysym is None and len(text) == 1 and 32 <= ord(text) <= 126:
             keysym = ord(text)
         if keysym is not None:
-            self._expect_picture()
             self.client.key_tap(keysym)
             return True
         return False
@@ -417,7 +402,6 @@ class DesktopWireless(QObject):
     def phone_button(self, method, *args):
         symbol = {"home": "h", "volumeUp": "]", "volumeDown": "["}.get(args[0] if args else method)
         if symbol:
-            self._expect_picture()
             self.client.key_tap(ord(symbol), ctrl=True)
             return True
         return False

@@ -101,7 +101,7 @@ This is the path for scrolling and tapping over Wi-Fi with no cable attached dur
 3. Open **iPhone Mirroring Linux** from your application menu and click **Connect over Wi-Fi**. The app reuses the existing pairing and mounts the Developer Disk Image as needed. The first mount may need internet access.
 4. Click to tap, drag to swipe, and use the mouse wheel to scroll. Click a text field before typing. **Ctrl+H** goes Home. Use the right-click menu or **Ctrl+U** to disconnect.
 
-If you already created the pairing over USB, you can go straight to step 3. Stop an existing browser or VNC session before switching to the desktop app. The desktop viewer is silent on Linux. It limits the displayed stream to a 1440-pixel long edge to reduce local video traffic, and targets up to 60 display updates per second. Actual frame rate depends on the device, decoder, and network. If input continues while video stalls, the app retries the stream automatically.
+If you already created the pairing over USB, you can go straight to step 3. Stop an existing browser or VNC session before switching to the desktop app. The desktop viewer is silent on Linux. It limits the displayed stream to a 1440-pixel long edge to reduce local video traffic, and targets up to 60 display updates per second. Actual frame rate depends on the device, decoder, and network. The Linux software decoder keeps processing video while requesting recovery frames. Reconnect attempts apply to failed connections or viewer processes.
 
 After a successful Wi-Fi connection, the app remembers to reconnect on the next launch. Temporary viewer failures retry up to three times. Use **Control**, **Ctrl+U**, or **Disconnect Wi-Fi** to deliberately disconnect and turn off automatic connection.
 
@@ -203,6 +203,7 @@ python -m pip install -e '.[control]'
 python tests/test_fairplay.py
 python tests/test_wda.py
 python tests/test_desktop_wireless.py
+python tests/test_wireless_video.py
 python tools/smoke_test.py
 ```
 

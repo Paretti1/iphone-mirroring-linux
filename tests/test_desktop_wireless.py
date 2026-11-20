@@ -59,6 +59,67 @@ asyncio.run(main())
 """
 
 
+HEVC_VIEWER = """
+import asyncio
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+sys.path.insert(0, sys.argv[4])
+from test_wireless_video import Transport, encoded_frames
+from iphone_mirror.wireless_backend import configure_backend
+configure_backend()
+from pymobiledevice3.remote.core_device.vnc_server import VncStreamServer
+
+async def main():
+    port, password, event_path = sys.argv[1:4]
+    records = Path(event_path)
+    viewer = VncStreamServer(SimpleNamespace(service=SimpleNamespace(address=("127.0.0.1",0))),
+                             decoder="av", password=password)
+    viewer._loop = asyncio.get_running_loop()
+    # A real sender advertises an RTCP destination. This activates the problematic
+    # refresh on client-connect in the unpatched upstream server.
+    viewer._rtcp_dest = ("127.0.0.1", 9)
+    transport = Transport()
+    packets = encoded_frames()
+    receive = asyncio.create_task(viewer._udp_recv_and_pipe(transport))
+    transport.feed(packets[0])
+    while not viewer._ready.is_set():
+        await asyncio.sleep(0.01)
+
+    async def pointer(client, mask, x, y):
+        with records.open("a") as output:
+            print("pointer", mask, file=output)
+
+    async def key(client, down, code):
+        with records.open("a") as output:
+            print("key", int(down), code, file=output)
+
+    viewer._handle_pointer = pointer
+    viewer._handle_key = key
+
+    async def feed():
+        while not viewer._clients:
+            await asyncio.sleep(0.01)
+        for packet in packets[1:]:
+            transport.feed(packet)
+            await asyncio.sleep(0.05)
+
+    feed_task = asyncio.create_task(feed())
+    try:
+        async with await asyncio.start_server(viewer._handle_client, "127.0.0.1", int(port)) as server:
+            print("VNC ready:", flush=True)
+            await server.serve_forever()
+    finally:
+        receive.cancel()
+        feed_task.cancel()
+        await asyncio.gather(receive, feed_task, return_exceptions=True)
+        if viewer._transcoder:
+            viewer._transcoder.close()
+
+asyncio.run(main())
+"""
+
+
 class PackedFrameTest(unittest.TestCase):
     def test_desktop_frame_rotation_and_transport_size(self):
         pixels = np.zeros((2556, 1179, 4), dtype=np.uint8)
@@ -99,6 +160,55 @@ class DesktopWirelessTest(unittest.TestCase):
                 return
             QTest.qWait(20)
         self.fail(message)
+
+    def test_hevc_video_keeps_updating_while_input_is_sent(self):
+        app = QApplication.instance() or QApplication([])
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)
+            window = PhoneWindow(Settings(path / "config.json"), None)
+            backend = window.wireless
+            received = []
+            backend.frame.connect(lambda data, width, height: received.append(int(data[0, 0, 0])))
+            original_start = backend.process.start
+            commands = []
+            events = path / "events.txt"
+
+            def start(program, args):
+                commands.append(args)
+                if "mounter" in args:
+                    original_start(sys.executable, ["-c", "pass"])
+                else:
+                    self.assertIn("iphone_mirror.wireless_backend", args)
+                    original_start(sys.executable, [
+                        "-u", "-c", HEVC_VIEWER, args[args.index("--port") + 1],
+                        args[args.index("--password") + 1], str(events), str(Path(__file__).parent),
+                    ])
+
+            window.show()
+            try:
+                with patch.object(backend.process, "start", side_effect=start):
+                    QTest.mouseClick(window._wireless_button, Qt.LeftButton)
+                    self.wait_for(lambda: len(received) >= 1, "The first HEVC frame did not arrive")
+                    QTest.mouseClick(window, Qt.LeftButton, pos=window.phone_rect().center().toPoint())
+                    QTest.keyClicks(window, "hello")
+                    self.wait_for(lambda: len(received) >= 15, "HEVC video froze after initial display")
+                    self.assertGreater(len(set(received)), 10)
+                    self.assertEqual(len(commands), 2, "Input should not restart the video session")
+                    self.assertIn("pointer", events.read_text())
+                    self.assertIn("key", events.read_text())
+                    self.assertTrue(backend.ready)
+                    # The old input watchdog disconnected a healthy session after eight
+                    # seconds with no further video. Let the encoded sequence finish,
+                    # send input, and ensure that static pictures keep the session alive.
+                    QTest.qWait(1200)
+                    QTest.keyClicks(window, " again")
+                    QTest.qWait(8500)
+                    self.assertTrue(backend.ready)
+                    self.assertEqual(len(commands), 2, "A static picture triggered a reconnect")
+            finally:
+                backend.shutdown()
+                window.close()
+                app.processEvents()
 
     def test_toolbar_at_small_sizes_and_control_states(self):
         app = QApplication.instance() or QApplication([])
@@ -197,8 +307,10 @@ class DesktopWirelessTest(unittest.TestCase):
                     # The server remains alive and accepts input, but stops sending pictures.
                     bridge.touch(0.5, 0.5, True)
                     bridge.touch(0.5, 0.5, False)
-                    bridge._waiting_for_picture = time.monotonic() - 9
-                    bridge._check_picture()
+                    QTest.qWait(150)
+                    self.assertTrue(bridge.ready)
+                    self.assertEqual(bridge.process.processId(), old_process)
+                    bridge.process.kill()
                     self.wait_for(
                         lambda: bridge.ready and bridge.process.processId() != old_process,
                         "Desktop did not reconnect after the viewer exited", timeout=10,
