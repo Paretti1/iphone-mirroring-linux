@@ -199,6 +199,15 @@ The desktop starts its installed video backend in isolated Python mode. Launchin
 the app from an older source checkout cannot silently load that checkout's backend.
 Diagnostic mode also logs the backend's own version and module path at startup.
 
+Wireless video uses separate HEVC decode and preview workers. The decoder keeps
+predictive reference frames intact while a single preview slot replaces obsolete
+decoded images when resizing or display is slower than the phone. Scaling goes
+directly from YUV to preview-sized BGRA; the asyncio display notification is also
+limited to the newest image. Compressed video is capped at 12 queued access units.
+If decoding itself overloads, recovery resumes at a keyframe instead of building
+an unlimited delayed queue. Diagnostics include queue age, skipped previews, and
+compressed drops. Actual FPS still depends on the CPU, device, and network.
+
 - Settings are in `${XDG_CONFIG_HOME:-~/.config}/iphone-mirroring-linux/settings.json`. The file includes `name`, `height`, `width`, `fps`, `audio`, and `always_on_top`. Quit before editing. The default request is 1080p at 60 fps. The actual stream depends on the phone and network.
 - Logs are in `${XDG_STATE_HOME:-~/.local/state}/iphone-mirroring-linux/`. The **Open Log** menu item opens the app log.
 - Screenshots are saved in **Pictures → iPhone Mirroring Linux** using the desktop’s configured Pictures folder.

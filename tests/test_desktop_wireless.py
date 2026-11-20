@@ -24,7 +24,8 @@ from PySide6.QtWidgets import QApplication
 from iphone_mirror.config import Settings
 from iphone_mirror.desktop_wireless import DesktopWireless
 from iphone_mirror.ui import PhoneWindow
-from iphone_mirror.wireless_backend import emit_packed_frame, present_desktop_frame
+from iphone_mirror.wireless_backend import present_desktop_frame
+from iphone_mirror.realtime_hevc import RealtimeHevcDecoder
 
 SIMULATED_VIEWER = """\
 import asyncio
@@ -137,12 +138,12 @@ class PackedFrameTest(unittest.TestCase):
         for width in (1080, 1179, 1180):
             with self.subTest(width=width):
                 images = []
-                target = SimpleNamespace(width=width, height=240, _on_frame=images.append)
+                target = SimpleNamespace(width=width, height=240)
                 for value in (20, 100):
                     source = av.VideoFrame.from_ndarray(
                         np.full((240, width, 3), value, dtype=np.uint8), format="rgb24"
                     )
-                    emit_packed_frame(target, source)
+                    images.append(RealtimeHevcDecoder._convert(target, source))
                 self.assertEqual(len(images[0]), width * 240 * 4)
                 self.assertEqual(len(images[1]), width * 240 * 4)
                 first = np.frombuffer(images[0], np.uint8).reshape(240, width, 4)

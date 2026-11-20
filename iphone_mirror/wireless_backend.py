@@ -6,12 +6,13 @@ import logging
 import os
 import runpy
 import sys
+import threading
 from importlib.metadata import version
 
 import av
 import numpy as np
 
-MAX_DISPLAY_EDGE = 1440
+from iphone_mirror.realtime_hevc import MAX_DISPLAY_EDGE, RealtimeHevcDecoder
 log = logging.getLogger(__name__)
 
 
@@ -39,10 +40,13 @@ def diagnostic_backend_snapshot(viewer, transport):
     return (
         f"packets={transport.packets} bytes={transport.bytes} "
         f"fed={getattr(decoder, '_diagnostic_fed', 0)} "
-        f"decoded={getattr(decoder, '_diagnostic_decoded', 0)} "
+        f"decoded={getattr(decoder, 'decoded_frames', getattr(decoder, '_diagnostic_decoded', 0))} "
         f"decode_errors={getattr(decoder, '_diagnostic_errors', 0)} "
         f"published={viewer._frames_emitted} "
         f"queued={queue.qsize() if queue is not None else -1} "
+        f"queue_age_ms={getattr(decoder, 'queue_age_ms', 0)} "
+        f"skipped_previews={getattr(decoder, 'skipped_previews', 0)} "
+        f"compressed_drops={getattr(decoder, 'dropped_packets', 0)} "
         f"decoder_alive={worker.is_alive() if worker is not None else False} "
         f"refresh_pending={viewer._refresh_pending}"
     )
@@ -99,22 +103,16 @@ def diagnostic_receiver(receive):
     return wrapped
 
 
-def emit_packed_frame(transcoder, frame):
-    """Remove FFmpeg row padding before handing BGRA pixels to the VNC server."""
-    image = frame.reformat(width=transcoder.width, height=transcoder.height, format="bgra")
-    pixels = image.to_ndarray()
-    pixels[:, :, 3] = 255
-    transcoder._on_frame(pixels.tobytes())
-
-
 def present_desktop_frame(viewer, bgra, width, height):
     """Crop and orient the decoded picture, then limit the local transport size."""
     from pymobiledevice3.remote.core_device.vnc_server import content_size
 
     crop_width, crop_height = content_size(width, height, viewer._display_size)
+    rotation = viewer._rotation
+    if not rotation and (crop_width, crop_height) == (width, height) and max(width, height) <= MAX_DISPLAY_EDGE:
+        return bgra, width, height, rotation
     pixels = np.frombuffer(bgra, dtype=np.uint8).reshape(height, width, 4)
     pixels = pixels[:crop_height, :crop_width]
-    rotation = viewer._rotation
     if rotation:
         pixels = np.rot90(pixels, -(rotation // 90))
     height, width = pixels.shape[:2]
@@ -125,6 +123,43 @@ def present_desktop_frame(viewer, bgra, width, height):
         pixels = frame.to_ndarray()
         height, width = pixels.shape[:2]
     return pixels.tobytes(), width, height, rotation
+
+
+class FrameMailbox:
+    """Allow at most one pending display notification on the asyncio loop."""
+
+    def __init__(self, loop, publish):
+        self.loop = loop
+        self.publish = publish
+        self.lock = threading.Lock()
+        self.pending = None
+        self.scheduled = False
+
+    def submit(self, frame):
+        with self.lock:
+            self.pending = frame
+            if self.scheduled or self.loop.is_closed():
+                return
+            self.scheduled = True
+        self.loop.call_soon_threadsafe(self._deliver)
+
+    def _deliver(self):
+        with self.lock:
+            frame, self.pending = self.pending, None
+            self.scheduled = False
+        if frame is not None:
+            self.publish(*frame)
+
+
+def publish_latest_frame(viewer, bgra, width, height):
+    loop = viewer._loop
+    if loop is None or loop.is_closed():
+        return
+    viewer._latest_raw = (bgra, width, height)
+    mailbox = getattr(viewer, "_desktop_mailbox", None)
+    if mailbox is None:
+        mailbox = viewer._desktop_mailbox = FrameMailbox(loop, viewer._broadcast_frame)
+    mailbox.submit(viewer._present(bgra, width, height))
 
 
 def request_software_keyframe(viewer, now, *, reason):
@@ -144,11 +179,12 @@ def request_software_keyframe(viewer, now, *, reason):
 
 def configure_backend():
     """Apply Linux compatibility fixes to this viewer process only."""
-    from pymobiledevice3.remote.core_device.hevc_av import HevcToBgraTranscoder
+    from pymobiledevice3.remote.core_device import hevc_av
     from pymobiledevice3.remote.core_device.vnc_server import VncStreamServer
 
-    HevcToBgraTranscoder._emit_frame = emit_packed_frame
+    hevc_av.HevcToBgraTranscoder = RealtimeHevcDecoder
     VncStreamServer._present = present_desktop_frame
+    VncStreamServer._on_frame_from_worker = publish_latest_frame
     VncStreamServer._fire_decoder_refresh = request_software_keyframe
     if os.environ.get("IPHONE_MIRROR_DIAGNOSTICS") == "1":
         VncStreamServer._new_transcoder = diagnostic_transcoder(VncStreamServer._new_transcoder)
