@@ -65,6 +65,7 @@ class RealtimeHevcDecoder:
         self._waiting_for_keyframe = False
         self._last_recovery = 0.0
         self.decoded_frames = self.presented_frames = 0
+        self.last_preview_ms = 0.0
         self.skipped_previews = self.dropped_packets = self.recoveries = 0
         self._present_thread = threading.Thread(target=self._present, name="hevc-preview", daemon=True)
         self._thread = threading.Thread(target=self._run, name="hevc-decode", daemon=True)
@@ -131,7 +132,7 @@ class RealtimeHevcDecoder:
                 continue
             if item is None:
                 break
-            generation, packet, _ = item
+            generation, packet, arrived = item
             if generation != self._generation:
                 continue
             try:
@@ -150,7 +151,7 @@ class RealtimeHevcDecoder:
                         continue
                     if self._preview is not None:
                         self.skipped_previews += 1
-                    self._preview = (generation, frame)
+                    self._preview = (generation, frame, arrived)
                     self._preview_ready.notify()
 
     def _convert(self, frame):
@@ -164,12 +165,13 @@ class RealtimeHevcDecoder:
                 self._preview_ready.wait_for(lambda: self._preview is not None or self._stop.is_set())
                 if self._stop.is_set():
                     break
-                generation, frame = self._preview
+                generation, frame, arrived = self._preview
                 self._preview = None
             try:
                 pixels = self._convert(frame)
                 if not self._stop.is_set() and generation == self._generation:
                     self._on_frame(pixels)
+                    self.last_preview_ms = (time.monotonic() - arrived) * 1000
                     self.presented_frames += 1
             except Exception:
                 log.exception("HEVC preview conversion failed")

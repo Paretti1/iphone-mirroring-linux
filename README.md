@@ -193,6 +193,45 @@ and test on a private network that allows devices to communicate. An ordinary
 internet VPN does not create this local connection or override client isolation.
 Preserve the existing pairing while checking the network.
 
+### Keep a VPN on the iPhone while mirroring on school Wi-Fi
+
+If the VPN is needed for apps running on the iPhone, it can stay on: enable its
+local/LAN connection option and keep both devices on the same reachable network.
+The PC does not need to inherit the phone's VPN just to mirror those phone apps.
+If the school access point isolates devices, the VPN's internet route does not
+provide the missing local Bonjour/device connection.
+
+To keep school Wi-Fi as the internet uplink while creating a private network,
+Fedora can host a hotspot using a separate network interface. In the [standard
+GNOME hotspot workflow](https://help.gnome.org/gnome-help/net-wireless-adhoc.html),
+turning the only Wi-Fi adapter into a hotspot disconnects its existing Wi-Fi
+connection. A separate uplink, such as Ethernet or a second Wi-Fi adapter, is
+needed for that workflow. The iPhone could join the private hotspot and run its
+own VPN through the shared internet connection. This topology has not been
+verified on the user's hardware.
+
+### iPhone hotspot with a VPN as a cellular alternative
+
+An iPhone [Personal Hotspot shares cellular data](https://support.apple.com/en-us/111785).
+It does not re-share the public Wi-Fi connection as a private Wi-Fi relay.
+Ordinary iOS VPN apps also [do not share their VPN tunnel with hotspot clients](https://support.surfshark.com/hc/en-us/articles/360011976940-Can-I-share-a-VPN-connection-from-my-phone-using-a-mobile-hotspot).
+
+To test a route that avoids the public access point:
+
+1. Disconnect the iPhone from public Wi-Fi and turn Cellular Data on.
+2. Open **Settings → Personal Hotspot → Allow Others to Join**. Stay on that
+   page while Fedora joins the iPhone's Wi-Fi network using its hotspot password.
+3. First test the mirroring app with VPNs off and the iPhone awake and unlocked.
+4. Enable the iPhone VPN with **Allow LAN connections** or the equivalent local
+   network setting enabled. For example, see [Proton's LAN settings](https://protonvpn.com/support/lan-connections).
+5. If the PC also needs a VPN, run a VPN on Fedora separately and allow LAN
+   communication there too. The phone VPN does not automatically cover the PC.
+
+This uses the carrier's cellular/hotspot data. The setup must still pass the
+iPhone's developer Bonjour discovery; mirroring over an iPhone-hosted hotspot
+has not been verified with physical hardware. If discovery works without the
+VPN but fails after enabling it, check that VPN's local network restrictions.
+
 Python 3.15 with Qt needs an explicitly owned AirPlay I/O pool for discovery,
 FairPlay key decryption, and shutdown. The app supplies that pool rather than
 relying on the default asyncio executor. A Python `lazy_import` traceback is an
@@ -246,6 +285,16 @@ If decoding itself overloads, recovery resumes at a keyframe instead of building
 an unlimited delayed queue. Diagnostics include queue age, skipped previews, and
 compressed drops. Actual FPS still depends on the CPU, device, and network.
 
+For input, only a drag's newest pending motion is retained while the previous
+motion is being sent. Presses, releases, button changes, and typing remain
+ordered. Trackpad bursts extend one active swipe rather than repeatedly starting
+new touches, and small wheel deltas remain small. Touchscreen/keyboard services
+are prepared before the viewer is ready, with a lazy retry if preparation fails.
+Large local video packets stay in Qt-owned buffers rather than making another
+full-frame Python bytes copy. Diagnostics expose `motion_pending`,
+`motion_coalesced`, `hid_send_ms`, and `preview_age_ms`. These measure local send
+duration and local decode/preview age, not a physical touch-to-display round trip.
+
 - Settings are in `${XDG_CONFIG_HOME:-~/.config}/iphone-mirroring-linux/settings.json`. The file includes `name`, `height`, `width`, `fps`, `audio`, and `always_on_top`. Quit before editing. The default request is 1080p at 60 fps. The actual stream depends on the phone and network.
 - Logs are in `${XDG_STATE_HOME:-~/.local/state}/iphone-mirroring-linux/`. The **Open Log** menu item opens the app log.
 - Screenshots are saved in **Pictures → iPhone Mirroring Linux** using the desktop’s configured Pictures folder.
@@ -269,6 +318,7 @@ python tests/test_fairplay.py
 python tests/test_wda.py
 python tests/test_desktop_wireless.py
 python tests/test_wireless_video.py
+python tests/test_wireless_input.py
 python tests/test_airplay_lifecycle.py
 python tools/smoke_test.py
 ```

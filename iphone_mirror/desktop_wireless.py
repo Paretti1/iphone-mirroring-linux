@@ -94,7 +94,11 @@ class FramebufferClient(QObject):
         consumed = 0
         try:
             while self._messages is not None and self.socket.bytesAvailable() >= self._size:
-                packet = bytes(self.socket.read(self._size)) if self._size else b""
+                packet = self.socket.read(self._size) if self._size else b""
+                # Keep large pixel payloads in Qt's buffer. NumPy retains that
+                # buffer, avoiding another full-frame QByteArray -> bytes copy.
+                if self._size < 65536:
+                    packet = bytes(packet)
                 consumed += len(packet)
                 self.received_bytes += len(packet)
                 required = self._messages.send(packet)
@@ -211,6 +215,8 @@ class DesktopWireless(QObject):
         self.scroll_timer.timeout.connect(self._scroll_step)
         self._scroll_points = iter(())
         self._scroll_position = None
+        self._scroll_target = None
+        self._scroll_direction = 0
         self._phase = ""
         self._pending_output = b""
         self._last_output = ""
@@ -402,9 +408,23 @@ class DesktopWireless(QObject):
         self.client.pointer(x, y, pressed)
 
     def scroll(self, x, y, notches):
-        self._cancel_scroll()
+        if not notches:
+            return
         # A vertical touch swipe works with apps that expect finger gestures.
-        distance = min(0.65, max(0.18, abs(notches) * 0.26))
+        # Continue a live gesture for trackpad bursts instead of repeatedly
+        # releasing and re-pressing the touchscreen every wheel batch.
+        distance = min(0.65, max(0.005, abs(notches) * 0.26))
+        direction = -1 if notches < 0 else 1
+        if self._scroll_position is not None:
+            x, start = self._scroll_position
+            base = self._scroll_target if direction == self._scroll_direction else start
+            end = min(0.93, max(0.07, base + direction * distance))
+            if abs(end - start) > 0.002:
+                self._scroll_target = end
+                self._scroll_direction = direction
+                self._scroll_points = ((x, start + (end - start) * step / 5) for step in range(1, 6))
+                return
+            self._cancel_scroll()
         if notches < 0:
             start = min(0.93, max(y, 0.07 + distance))
             end = start - distance
@@ -412,6 +432,8 @@ class DesktopWireless(QObject):
             start = max(0.07, min(y, 0.93 - distance))
             end = start + distance
         self._scroll_position = (x, start)
+        self._scroll_target = end
+        self._scroll_direction = direction
         self._scroll_points = ((x, start + (end - start) * step / 5) for step in range(1, 6))
         self.client.pointer(x, start, True)
         self.scroll_timer.start()
@@ -429,6 +451,8 @@ class DesktopWireless(QObject):
             self.scroll_timer.stop()
             self.client.pointer(*self._scroll_position, False)
             self._scroll_position = None
+            self._scroll_target = None
+            self._scroll_direction = 0
 
     def key(self, event):
         keysym = SPECIAL_KEYS.get(event.key())

@@ -203,6 +203,45 @@ class DesktopWirelessTest(unittest.TestCase):
         self.assertEqual(len(displayed), 1, "Video waited an extra frame interval before display")
         client.close()
 
+    def test_trackpad_bursts_continue_one_contact_and_reverse_promptly(self):
+        app = QApplication.instance() or QApplication([])
+        backend = DesktopWireless()
+        sent = []
+        try:
+            with patch.object(backend.client, "pointer", side_effect=lambda x, y, down: sent.append((x, y, down))):
+                backend.scroll(0.5, 0.5, -0.1)
+                for _ in range(4):
+                    backend._scroll_step()
+                    backend.scroll(0.5, 0.5, -0.1)
+                before_reversal = sent[-1][1]
+                backend.scroll(0.5, 0.5, 0.1)
+                backend._scroll_step()
+                self.assertGreater(sent[-1][1], before_reversal)
+                self.assertTrue(all(down for _, _, down in sent), "A trackpad burst restarted the contact")
+                backend._cancel_scroll()
+                self.assertFalse(sent[-1][2])
+                self.assertEqual(sum(not down for _, _, down in sent), 1)
+        finally:
+            backend.shutdown()
+            app.processEvents()
+
+    def test_small_trackpad_delta_does_not_become_a_large_swipe(self):
+        app = QApplication.instance() or QApplication([])
+        backend = DesktopWireless()
+        sent = []
+        try:
+            with patch.object(backend.client, "pointer", side_effect=lambda x, y, down: sent.append((x, y, down))):
+                backend.scroll(0.5, 0.5, -0.05)
+                for _ in range(6):
+                    backend._scroll_step()
+                distance = sent[0][1] - sent[-1][1]
+                self.assertGreater(distance, 0)
+                self.assertLess(distance, 0.03)
+                self.assertFalse(sent[-1][2])
+        finally:
+            backend.shutdown()
+            app.processEvents()
+
     def test_border_drag_resizes_without_sending_phone_input_and_remembers_size(self):
         app = QApplication.instance() or QApplication([])
         with tempfile.TemporaryDirectory() as directory:
@@ -323,7 +362,13 @@ class DesktopWirelessTest(unittest.TestCase):
             window = PhoneWindow(Settings(path / "config.json"), None)
             backend = window.wireless
             received = []
-            backend.frame.connect(lambda data, width, height: received.append(int(data[0, 0, 0])))
+            buffers = []
+
+            def frame(data, width, height):
+                received.append(int(data[0, 0, 0]))
+                buffers.append(data)
+
+            backend.frame.connect(frame)
             original_start = backend.process.start
             commands = []
             events = path / "events.txt"
@@ -348,6 +393,7 @@ class DesktopWirelessTest(unittest.TestCase):
                     QTest.keyClicks(window, "hello")
                     self.wait_for(lambda: len(received) >= 15, "HEVC video froze after initial display")
                     self.assertGreater(len(set(received)), 10)
+                    self.assertEqual(int(buffers[0][0, 0, 0]), received[0], "A retained Qt pixel buffer was overwritten")
                     self.assertEqual(len(commands), 2, "Input should not restart the video session")
                     self.assertIn("pointer", events.read_text())
                     self.assertIn("key", events.read_text())

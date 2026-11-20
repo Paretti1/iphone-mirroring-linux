@@ -13,6 +13,7 @@ import av
 import numpy as np
 
 from iphone_mirror.realtime_hevc import MAX_DISPLAY_EDGE, RealtimeHevcDecoder
+from iphone_mirror.wireless_input import install_low_latency_input
 log = logging.getLogger(__name__)
 
 
@@ -37,6 +38,8 @@ def diagnostic_backend_snapshot(viewer, transport):
     decoder = viewer._transcoder
     queue = getattr(decoder, "_inq", None)
     worker = getattr(decoder, "_thread", None)
+    inputs = [getattr(client, "_linux_motion", None) for client in viewer._clients]
+    inputs = [item for item in inputs if item is not None]
     return (
         f"packets={transport.packets} bytes={transport.bytes} "
         f"fed={getattr(decoder, '_diagnostic_fed', 0)} "
@@ -45,9 +48,13 @@ def diagnostic_backend_snapshot(viewer, transport):
         f"published={viewer._frames_emitted} "
         f"queued={queue.qsize() if queue is not None else -1} "
         f"queue_age_ms={getattr(decoder, 'queue_age_ms', 0)} "
+        f"preview_age_ms={getattr(decoder, 'last_preview_ms', 0):.1f} "
         f"skipped_previews={getattr(decoder, 'skipped_previews', 0)} "
         f"compressed_drops={getattr(decoder, 'dropped_packets', 0)} "
         f"decoder_alive={worker.is_alive() if worker is not None else False} "
+        f"motion_pending={sum(item.pending is not None for item in inputs)} "
+        f"motion_coalesced={sum(item.coalesced for item in inputs)} "
+        f"hid_send_ms={max((item.last_send_ms for item in inputs), default=0):.1f} "
         f"refresh_pending={viewer._refresh_pending}"
     )
 
@@ -186,6 +193,7 @@ def configure_backend():
     VncStreamServer._present = present_desktop_frame
     VncStreamServer._on_frame_from_worker = publish_latest_frame
     VncStreamServer._fire_decoder_refresh = request_software_keyframe
+    install_low_latency_input(VncStreamServer)
     if os.environ.get("IPHONE_MIRROR_DIAGNOSTICS") == "1":
         VncStreamServer._new_transcoder = diagnostic_transcoder(VncStreamServer._new_transcoder)
         VncStreamServer._udp_recv_and_pipe = diagnostic_receiver(VncStreamServer._udp_recv_and_pipe)
