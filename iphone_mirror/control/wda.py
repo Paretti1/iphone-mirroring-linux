@@ -11,6 +11,8 @@ WDA is always on 127.0.0.1 or on the local network.
 import http.client
 import json
 import logging
+import math
+import re
 import threading
 import urllib.parse
 
@@ -18,6 +20,7 @@ log = logging.getLogger(__name__)
 MAX_RESPONSE = 2 * 1024 * 1024
 
 INVALID_SESSION = "invalid session id"
+SESSION_ID = re.compile(r"[A-Za-z0-9_-]{1,128}")
 
 # HID usage of the Home button (consumer page, "Menu"), for /wda/performIoHidEvent
 HID_PAGE_CONSUMER, HID_USAGE_HOME = 0x0C, 0x40
@@ -128,7 +131,7 @@ class WDA:
         status, raw = self._send(method, path, data, timeout or self.timeout)
         try:
             payload = json.loads(raw or b"{}")
-        except ValueError:
+        except (ValueError, RecursionError):
             payload = {}
         if not isinstance(payload, dict):
             payload = {"value": payload}
@@ -140,7 +143,9 @@ class WDA:
             if err:
                 text += f" {err}"
             if msg:
-                text += ": " + str(msg).strip().splitlines()[0][:200]
+                lines = str(msg).strip().splitlines()
+                if lines:
+                    text += ": " + lines[0][:200]
             raise WDAError(text, status, err)
         legacy = payload.get("status")  # pre-W3C (JSONWP) WDA builds: HTTP 200 + non-zero status
         if isinstance(legacy, int) and not isinstance(legacy, bool) and legacy != 0:
@@ -170,9 +175,10 @@ class WDA:
         caps = {"shouldWaitForQuiescence": False, "waitForIdleTimeout": 0}
         res = self._request("POST", "/session", {"capabilities": {"alwaysMatch": caps}})
         value = res.get("value") if isinstance(res.get("value"), dict) else {}
-        self.session_id = res.get("sessionId") or value.get("sessionId")
-        if not self.session_id:
-            raise WDAError("WebDriverAgent did not return a session id")
+        session_id = res.get("sessionId") or value.get("sessionId")
+        if not isinstance(session_id, str) or not SESSION_ID.fullmatch(session_id):
+            raise WDAError("WebDriverAgent did not return a valid session id")
+        self.session_id = session_id
         try:  # make gestures snappy: do not wait for animations / idle
             self._request(
                 "POST",
@@ -189,8 +195,11 @@ class WDA:
         if self.size is None or refresh:
             v = self._session("GET", "/window/size").get("value")
             v = v if isinstance(v, dict) else {}
-            size = (float(v.get("width") or 0), float(v.get("height") or 0))
-            if not all(size):
+            try:
+                size = (float(v.get("width") or 0), float(v.get("height") or 0))
+            except (TypeError, ValueError, OverflowError):
+                raise WDAError("could not read the screen size") from None
+            if not all(math.isfinite(edge) and 1 <= edge <= 4096 for edge in size):
                 raise WDAError("could not read the screen size")
             self.size = size
         return self.size

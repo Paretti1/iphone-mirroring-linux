@@ -10,12 +10,15 @@ then moved by dragging the top bar or with Alt+drag anywhere.
 """
 import logging
 import math
+import tempfile
+import threading
 import time
+from html import escape
 from pathlib import Path
 from uuid import uuid4
 
 from PySide6.QtCore import (
-    QEvent, QObject, QPoint, QPointF, QRect, QRectF, QStandardPaths, Qt, QTimer, QUrl, Signal,
+    QBuffer, QEvent, QIODevice, QObject, QPoint, QPointF, QRect, QRectF, QStandardPaths, Qt, QTimer, QUrl, Signal, Slot,
 )
 from PySide6.QtGui import (
     QAction,
@@ -39,6 +42,7 @@ from PySide6.QtWidgets import QApplication, QHBoxLayout, QLabel, QMenu, QMessage
 
 from .config import APP_NAME, LOG_FILE
 from .control import ERROR, OFF, READY, STARTING
+from .control.wireless import OLDER_IOS_MESSAGE
 from .desktop_wireless import DesktopWireless
 
 log = logging.getLogger(__name__)
@@ -68,6 +72,27 @@ class Bridge(QObject):
     frame = Signal(object, int, int)
     event = Signal(str, dict)
     control = Signal(str, str)  # Controller.on_state(state, message)
+    _frame_available = Signal()
+
+    def __init__(self):
+        super().__init__()
+        self._frame_lock = threading.Lock()
+        self._latest_frame = None
+        self._frame_available.connect(self._deliver_frame, Qt.QueuedConnection)
+
+    def post_frame(self, image, width, height):
+        with self._frame_lock:
+            already_pending = self._latest_frame is not None
+            self._latest_frame = (image, width, height)
+        if not already_pending:
+            self._frame_available.emit()
+
+    @Slot()
+    def _deliver_frame(self):
+        with self._frame_lock:
+            frame, self._latest_frame = self._latest_frame, None
+        if frame is not None:
+            self.frame.emit(*frame)
 
 
 def app_icon(size: int = 64) -> QIcon:
@@ -206,6 +231,7 @@ class PhoneWindow(QWidget):
         layout.setContentsMargins(8, 4, 8, 4)
         layout.setSpacing(0)
         self._status_label = QLabel("iPhone")
+        self._status_label.setTextFormat(Qt.PlainText)
         self._status_label.setAttribute(Qt.WA_TransparentForMouseEvents)
         layout.addWidget(self._status_label)
         row = QHBoxLayout()
@@ -495,6 +521,9 @@ class PhoneWindow(QWidget):
         if self.rx is not None:
             self.rx.set_muted(self.wireless.active or not self.settings["audio"])
         if state == ERROR:
+            if message == OLDER_IOS_MESSAGE:
+                self._set_legacy_mode(True)
+                self.state = "waiting"
             self._show_control_error(message)
         if state == READY:
             self.settings["wireless_auto_connect"] = True
@@ -551,6 +580,7 @@ class PhoneWindow(QWidget):
             except RuntimeError:  # already deleted
                 pass
         box = QMessageBox(QMessageBox.Warning, "iPhone control", message, QMessageBox.Ok, self)
+        box.setTextFormat(Qt.PlainText)
         box.setWindowModality(Qt.NonModal)
         box.setAttribute(Qt.WA_DeleteOnClose)
         box.setTextInteractionFlags(Qt.TextSelectableByMouse)
@@ -733,7 +763,7 @@ class PhoneWindow(QWidget):
         width = max(0, self._toolbar.width() - 16)
         label = self._bar_labels()[0]
         self._status_label.setText(self._status_label.fontMetrics().elidedText(label, Qt.ElideRight, width))
-        self._status_label.setToolTip(label)
+        self._status_label.setToolTip(f"<qt>{escape(label)}</qt>")
         for name, button in self._toolbar_buttons.items():
             button.setToolTip(self._button_tip(name))
         self._toolbar_buttons["home"].setEnabled(self._control_ready())
@@ -1296,11 +1326,21 @@ class PhoneWindow(QWidget):
                 img = QImage(arr.data, arr.shape[1], arr.shape[0], arr.strides[0], QImage.Format_RGB32).copy()
             pictures = QStandardPaths.writableLocation(QStandardPaths.PicturesLocation)
             folder = Path(pictures or Path.home() / "Pictures") / APP_NAME
-            folder.mkdir(parents=True, exist_ok=True)
+            folder.mkdir(mode=0o700, parents=True, exist_ok=True)
             timestamp = time.strftime("%Y-%m-%d %H-%M-%S")
             path = folder / f"iPhone {timestamp} {uuid4().hex[:6]}.png"
-            if not img.save(str(path)):
+            png = QBuffer()
+            if not png.open(QIODevice.WriteOnly) or not img.save(png, "PNG"):
                 raise OSError(f"Could not write {path}")
+            tmp = None
+            try:
+                with tempfile.NamedTemporaryFile(dir=folder, suffix=".png", delete=False) as file:
+                    tmp = Path(file.name)
+                    file.write(bytes(png.data()))
+                tmp.replace(path)
+            finally:
+                if tmp is not None:
+                    tmp.unlink(missing_ok=True)
             if self._tray:
                 self._tray.showMessage("Screenshot saved", str(path), app_icon(), 3000)
             else:

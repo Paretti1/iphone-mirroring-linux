@@ -22,6 +22,7 @@ NTP_EPOCH = 2208988800
 MAX_RTSP_BODY = 1024 * 1024
 MAX_RTSP_HEADER = 16 * 1024
 MAX_CONNECTIONS = 8
+MAX_CONNECTIONS_PER_PEER = 4
 HANDSHAKE_TIMEOUT = 10
 
 
@@ -111,7 +112,7 @@ class Connection:
         log.info("connection from %s", self.remote_ip)
         try:
             while True:
-                timeout = None if self.rx.session_owner is self else HANDSHAKE_TIMEOUT
+                timeout = None if self.mirror or self.audio else HANDSHAKE_TIMEOUT
                 req = await asyncio.wait_for(self._read_request(), timeout)
                 if req is None:
                     break
@@ -177,14 +178,15 @@ class Connection:
             out.append(f"{k}: {v}")
         out.append(f"Content-Length: {len(resp.body)}")
         self.writer.write(("\r\n".join(out) + "\r\n\r\n").encode() + resp.body)
-        await self.writer.drain()
+        async with asyncio.timeout(HANDSHAKE_TIMEOUT):
+            await self.writer.drain()
 
     async def _dispatch(self, req: Request) -> Response:
         path = req.url.split("?")[0]
         if req.method == "POST" and path == "/feedback":
             log.debug("%s %s", req.method, req.url)
         else:
-            log.info("%s %s (%d bytes)", req.method, req.url, len(req.body))
+            log.debug("AirPlay %s (%d bytes)", req.method, len(req.body))
         resp = Response()
         public = req.method == "OPTIONS" or (req.method == "GET" and path == "/info") or (
             req.method == "POST" and path in ("/info", "/pair-setup", "/pair-verify")
@@ -220,12 +222,13 @@ class Connection:
             elif req.method == "POST" and path in ("/feedback", "/audioMode"):
                 pass
             else:
-                log.warning("unhandled request %s %s", req.method, req.url)
+                log.debug("ignoring unhandled AirPlay request")
         except Exception as e:
-            log.exception("error handling %s %s", req.method, req.url)
+            log.debug("error handling AirPlay %s", req.method, exc_info=True)
             resp = Response(500, "Internal Server Error")
             if isinstance(e, ValueError):
                 resp = Response(400, "Bad Request")
+            resp.close = req.method == "SETUP"
         return resp
 
     # ---------------------------------------------------------------- handlers
@@ -307,32 +310,44 @@ class Connection:
     async def on_setup(self, req, resp):
         rx = self.rx
         plist = plistlib.loads(req.body) if req.body else {}
+        if not isinstance(plist, dict):
+            raise ValueError("invalid SETUP body")
+        streams = plist.get("streams", [])
+        if not isinstance(streams, list) or len(streams) > 8 or any(not isinstance(s, dict) for s in streams):
+            raise ValueError("invalid SETUP streams")
+        known_types = [s.get("type") for s in streams if s.get("type") in (96, 110)]
+        if len(known_types) != len(set(known_types)):
+            raise ValueError("duplicate SETUP stream")
         out = {}
-        if "ekey" in plist and "eiv" in plist:
+        if "ekey" in plist or "eiv" in plist:
+            ekey, eiv = plist.get("ekey"), plist.get("eiv")
+            timing_port = plist.get("timingPort", 0)
+            if not isinstance(ekey, bytes) or len(ekey) != 72 or not isinstance(eiv, bytes) or len(eiv) != 16:
+                raise ValueError("invalid AirPlay stream key or IV")
+            if type(timing_port) is not int or not 0 <= timing_port <= 65535:
+                raise ValueError("invalid AirPlay timing port")
             if rx.session_owner not in (None, self):
                 resp.status, resp.reason = 453, "Not Enough Bandwidth"
                 resp.close = True
                 return
-            aeskey = await rx.run_io(self.fairplay.decrypt, plist["ekey"])
+            aeskey = await rx.run_io(self.fairplay.decrypt, ekey)
             if rx.session_owner not in (None, self):
                 resp.status, resp.reason = 453, "Not Enough Bandwidth"
                 resp.close = True
                 return
             rx.session_owner = self
-            self.client_name = plist.get("name") or "iPhone"
-            log.info("SETUP from %s (%s, %s)", self.client_name, plist.get("model"), plist.get("osVersion"))
-            rx.emit("connecting", name=self.client_name, model=plist.get("model") or "",
-                    os=plist.get("osVersion") or "")
+            name = plist.get("name")
+            self.client_name = "".join(c for c in name[:80] if c.isprintable()) if isinstance(name, str) else ""
+            rx.emit("connecting", name=self.client_name or "iPhone")
             if self.pairing.ecdh_secret is not None:
                 aeskey = hashlib.sha512(aeskey + self.pairing.ecdh_secret).digest()[:16]
-            self.aeskey, self.aesiv = aeskey, plist["eiv"]
+            self.aeskey, self.aesiv = aeskey, eiv
             if self.timing:
                 self.timing.stop()
             self.timing = TimingSender()
-            tport = await self.timing.start(self.remote_ip, int(plist.get("timingPort") or 0))
+            tport = await self.timing.start(self.remote_ip, timing_port)
             out["timingPort"] = tport
             out["eventPort"] = 0
-        streams = plist.get("streams")
         if streams:
             if self.aeskey is None:
                 raise ValueError("stream SETUP before key exchange")
@@ -355,7 +370,7 @@ class Connection:
                     dport, cport = await self.audio.start()
                     res_streams.append({"dataPort": dport, "controlPort": cport, "type": 96})
                 else:
-                    log.warning("unknown stream type %s", stype)
+                    log.debug("ignoring unknown AirPlay stream type")
             out["streams"] = res_streams
         resp.set(_bplist(out), "application/x-apple-binary-plist")
 
@@ -421,7 +436,7 @@ class Receiver:
         self.port = 0
         self.advertiser = None
         self.session_owner = None
-        self._connections = set()
+        self._connections = {}
         self._stop_requested = threading.Event()
         self._stopping = None
         self._thread = None
@@ -489,17 +504,17 @@ class Receiver:
 
     async def _handle(self, reader, writer):
         peer = writer.get_extra_info("peername")
-        if len(self._connections) >= MAX_CONNECTIONS or (
-            net.ALLOWED_PHONE is not None and (not peer or peer[0] != net.ALLOWED_PHONE)
-        ):
+        if (not peer or (net.ALLOWED_PHONE is not None and peer[0] != net.ALLOWED_PHONE)
+                or len(self._connections) >= MAX_CONNECTIONS
+                or sum(ip == peer[0] for ip in self._connections.values()) >= MAX_CONNECTIONS_PER_PEER):
             writer.close()
             return
         task = asyncio.current_task()
-        self._connections.add(task)
+        self._connections[task] = peer[0]
         try:
             await Connection(self, reader, writer).serve()
         finally:
-            self._connections.discard(task)
+            self._connections.pop(task, None)
 
     async def _main(self):
         self.loop = asyncio.get_running_loop()

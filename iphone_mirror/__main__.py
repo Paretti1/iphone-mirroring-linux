@@ -32,15 +32,19 @@ class PrivateRotatingLog(RotatingFileHandler):
 def setup_logging():
     LOG_FILE.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     fmt = logging.Formatter("%(asctime)s %(levelname)-7s %(name)s: %(message)s")
-    fh = PrivateRotatingLog(LOG_FILE, maxBytes=2_000_000, backupCount=2, encoding="utf-8")
-    fh.setFormatter(fmt)
     root = logging.getLogger()
     root.setLevel(logging.INFO)
-    root.addHandler(fh)
     if sys.stderr:
         sh = logging.StreamHandler()
         sh.setFormatter(fmt)
         root.addHandler(sh)
+    try:
+        fh = PrivateRotatingLog(LOG_FILE, maxBytes=2_000_000, backupCount=2, encoding="utf-8")
+    except OSError as exc:
+        root.warning("Could not open the private log: %s", exc)
+    else:
+        fh.setFormatter(fmt)
+        root.addHandler(fh)
     logging.getLogger("zeroconf").setLevel(logging.WARNING)
 
 
@@ -150,7 +154,7 @@ def main():
     win = PhoneWindow(settings, None, ctrl, wireless_device=args.device_id)
     rx = Receiver(
         settings,
-        on_frame=lambda arr, w, h: bridge.frame.emit(arr, w, h),
+        on_frame=bridge.post_frame,
         on_event=lambda e, info: bridge.event.emit(e, info),
     )
     win.rx = rx

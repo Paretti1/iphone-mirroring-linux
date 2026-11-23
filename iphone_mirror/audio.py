@@ -13,6 +13,7 @@ from . import net
 log = logging.getLogger(__name__)
 
 RATE = 44100
+MAX_RTP_PACKET = 16 * 1024
 
 # codec configuration per AirPlay "ct" value
 CODECS = {
@@ -108,7 +109,7 @@ class _Proto(asyncio.DatagramProtocol):
         try:
             self.handler(data)
         except Exception:
-            log.exception("audio packet error")
+            log.debug("audio packet error", exc_info=True)
 
 
 class AudioStream:
@@ -163,7 +164,7 @@ class AudioStream:
             self._data(pkt[4:])
 
     def _data(self, pkt: bytes):
-        if len(pkt) < 12:
+        if not 12 < len(pkt) <= MAX_RTP_PACKET or pkt[0] >> 6 != 2:
             return
         seq = int.from_bytes(pkt[2:4], "big")
         if self._last_seq is not None:

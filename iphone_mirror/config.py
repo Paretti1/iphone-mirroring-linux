@@ -65,12 +65,16 @@ def private_log(path, mode="a"):
     path = Path(path)
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     flags = os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK
-    flags |= os.O_TRUNC if mode == "w" else os.O_APPEND
+    if mode == "a":
+        flags |= os.O_APPEND
     fd = os.open(path, flags, 0o600)
     try:
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
-            raise OSError("log path must be a regular file")
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_uid != os.getuid():
+            raise OSError("log path must be a regular file owned by this user with one link")
         os.fchmod(fd, 0o600)
+        if mode == "w":
+            os.ftruncate(fd, 0)
         return os.fdopen(fd, mode, encoding="utf-8", errors="replace")
     except BaseException:
         os.close(fd)

@@ -1,5 +1,20 @@
 # Security review and operating boundaries
 
+## Version 0.3.1 follow-up
+
+- AirPlay limits each sender address to four control connections. It also times
+  out incomplete media setup and requests or responses that stall mid-transfer.
+- AirPlay validates stream descriptors and media packet metadata. The desktop
+  retains only the newest pending preview when the UI is busy.
+- The WDA client validates session IDs and screen dimensions. The IPA repacker
+  streams members into the output and rejects duplicate entries, special files
+  and files nested beneath archive symlinks.
+- Logs are checked for ownership and hard links before they can be truncated.
+  Screenshots are saved as private files, and viewer passwords are redacted
+  from desktop logs.
+
+The dependency versions and operating boundaries below also apply to 0.3.1.
+
 ## Version 0.3.0 review
 
 Reviewed November 22, 2026. This release received a direct source review,

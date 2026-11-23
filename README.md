@@ -2,7 +2,8 @@
 
 Mirror your iPhone in a compact desktop window on Fedora and other Linux distributions. Standard AirPlay brings the screen and sound over Wi-Fi. Optional control lets you click, swipe, scroll, and type from your computer.
 
-Version 0.3.0 adds a remembered AirPlay mode for older iOS and security hardening.
+Version 0.3.1 adds automatic AirPlay selection for iPhones below iOS 27,
+version-specific WebDriverAgent downloads, and additional security hardening.
 See the [security review and limits](SECURITY.md) for the findings and test evidence.
 
 | Mode | Video and audio | Mouse and keyboard |
@@ -15,7 +16,9 @@ See the [security review and limits](SECURITY.md) for the findings and test evid
 
 Start `iphone-mirroring-linux --airplay`, or right-click the window and enable
 **Use AirPlay (older iOS)**. This choice is remembered and disables automatic
-attempts to start the iOS 27 developer viewer. Click **AirPlay setup** for instructions.
+attempts to start the iOS 27 developer viewer. If the paired phone reports an
+older iOS version when you try the direct viewer, the app selects AirPlay for you.
+Click **AirPlay setup** for instructions.
 On the unlocked iPhone, open **Control Center → Screen Mirroring** and select the
 computer. AirPlay video/audio do not require Developer Mode or iOS 27.
 
@@ -30,8 +33,16 @@ iphone-mirroring-linux --airplay --control --wda-url http://PHONE_IP:8100
 ```
 
 See [USB/WDA setup](#usb-control-and-existing-wi-fi-webdriveragent) below. Runner
-compatibility depends on the iOS and Xcode/WDA versions used to build it; downloading
-the latest unsigned IPA alone does not make it usable on every older iPhone.
+compatibility depends on iOS and the Xcode/WDA versions used to build it. Check
+[Appium's compatibility table](https://appium.github.io/appium-xcuitest-driver/latest/installation/requirements/)
+and choose a matching signed runner, or download that version for signing. For
+example, Appium lists WebDriverAgent 16.12.8 for iOS 18 and publishes a runner
+for real devices:
+
+```bash
+iphone-mirroring-control get-wda --version 16.12.8
+```
+
 No physical older-iOS device has been validated for this release. AirPlay on Linux
 does not provide Apple's locked-screen mirroring, and this project cannot backport
 the developer display stream: [upstream requires iOS 27+](https://doronz88.github.io/pymobiledevice3/master/guides/screen-mirroring/).
@@ -189,7 +200,7 @@ A USB-started XCTest runner usually ends when the underlying test connection clo
 | --- | --- |
 | `doctor` | Check USB detection, Developer Mode, installed runner, and WDA status |
 | `reveal-dev-mode` | Reveal the Developer Mode switch on a trusted USB device |
-| `get-wda [--out PATH]` | Download the official runner and package it as an unsigned IPA |
+| `get-wda [--version VERSION] [--out PATH]` | Download the official runner and package it as an unsigned IPA |
 | `start [--wda-url URL]` | Start a USB WDA session or attach to an explicit endpoint until Ctrl+C |
 | `tap X Y`, `home`, `type TEXT` | Send a test command to an existing WDA endpoint with `--url URL` |
 | `wireless-pair [--name NAME]` | Pair a compatible iPhone over Wi-Fi |

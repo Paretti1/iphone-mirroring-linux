@@ -2,6 +2,7 @@
 import asyncio
 import hashlib
 import logging
+import math
 import queue
 import struct
 import threading
@@ -17,6 +18,9 @@ log = logging.getLogger(__name__)
 
 START = b"\x00\x00\x00\x01"
 MAX_DECODE_PIXELS = 4096 * 4096
+MAX_VIDEO_EDGE = 4096
+MAX_VIDEO_NALS = 1024
+MEDIA_SETUP_TIMEOUT = 15
 
 
 class VideoQueue(queue.Queue):
@@ -53,8 +57,10 @@ def avcc_to_annexb(data: bytes):
     """4-byte big-endian length prefixed NALs -> start-code NALs. None if malformed."""
     out = bytearray()
     pos, n = 0, len(data)
+    count = 0
     while pos < n:
-        if pos + 4 > n:
+        count += 1
+        if pos + 4 > n or count > MAX_VIDEO_NALS:
             return None
         size = int.from_bytes(data[pos:pos + 4], "big")
         if size <= 0 or pos + 4 + size > n or data[pos + 4] & 0x80:
@@ -81,9 +87,15 @@ class VideoDecoder(threading.Thread):
         try:
             self.q.put_nowait(data)
         except queue.Full:
-            log.warning("decoder queue full, dropping frame")
+            log.debug("decoder queue full, dropping frame")
 
     def reset(self):
+        self.last_frame = None
+        try:
+            while True:
+                self.q.get_nowait()
+        except queue.Empty:
+            pass
         self.submit(None)
 
     def stop(self):
@@ -123,13 +135,17 @@ class VideoDecoder(threading.Thread):
                 log.exception("frame conversion failed")
 
     def _deliver(self, frame):
+        if not (0 < frame.width <= MAX_VIDEO_EDGE and 0 < frame.height <= MAX_VIDEO_EDGE):
+            return
         self.last_frame = frame
         tw, th = self.target or (frame.width, frame.height)
         tw, th = max(16, int(tw)), max(16, int(th))
         # keep the source aspect if the UI has not adapted yet
         if abs(tw / th - frame.width / frame.height) > 0.02:
             th = max(16, round(tw * frame.height / frame.width))
-        img = frame.reformat(width=tw, height=th, format="bgra", interpolation="AREA").to_ndarray()
+        scale = min(1, MAX_VIDEO_EDGE / max(tw, th))
+        img = frame.reformat(width=max(1, round(tw * scale)), height=max(1, round(th * scale)),
+                             format="bgra", interpolation="AREA").to_ndarray()
         img = np.ascontiguousarray(img)  # ffmpeg rows are padded; QImage wants a packed buffer
         self.on_frame(img, frame.width, frame.height)
 
@@ -185,14 +201,20 @@ class MirrorStream:
             pass
         self.decoder.reset()
         try:
+            # Leave established, idle phones connected. Bound the first byte
+            # of a new media stream and the remainder of each started packet.
+            async with asyncio.timeout(MEDIA_SETUP_TIMEOUT):
+                first = await reader.readexactly(1)
             while True:
-                hdr = await reader.readexactly(128)
-                size = struct.unpack_from("<I", hdr, 0)[0]
-                if size > MAX_VIDEO_PACKET:
-                    raise ValueError("video packet exceeds the size limit")
-                payload = await reader.readexactly(size) if size else b""
+                async with asyncio.timeout(MEDIA_SETUP_TIMEOUT):
+                    hdr = first + await reader.readexactly(127)
+                    size = struct.unpack_from("<I", hdr, 0)[0]
+                    if size > MAX_VIDEO_PACKET:
+                        raise ValueError("video packet exceeds the size limit")
+                    payload = await reader.readexactly(size) if size else b""
                 self._packet(hdr, payload)
-        except (asyncio.IncompleteReadError, ConnectionError):
+                first = await reader.readexactly(1)
+        except (asyncio.IncompleteReadError, ConnectionError, TimeoutError, ValueError):
             log.info("mirror stream closed")
         except asyncio.CancelledError:
             pass
@@ -207,6 +229,8 @@ class MirrorStream:
     def _packet(self, hdr: bytes, payload: bytes):
         ptype = hdr[4]
         if ptype == 0:  # encrypted video access unit
+            if not payload:
+                return
             dec = self.decryptor.update(payload)
             nal = avcc_to_annexb(dec)
             if nal is None:
@@ -228,16 +252,20 @@ class MirrorStream:
             if payload[4:8] == b"hvc1":
                 log.error("client sent H.265, which is not supported")
                 return
+            if len(payload) < 8:
+                raise ValueError("incomplete AirPlay H.264 configuration")
             sps_size = struct.unpack_from(">H", payload, 6)[0]
+            if not sps_size or len(payload) < sps_size + 11:
+                raise ValueError("invalid AirPlay H.264 SPS")
             sps = payload[8:8 + sps_size]
             pps_size = struct.unpack_from(">H", payload, sps_size + 9)[0]
+            if not pps_size or len(payload) < sps_size + 11 + pps_size:
+                raise ValueError("invalid AirPlay H.264 PPS")
             pps = payload[sps_size + 11:sps_size + 11 + pps_size]
             self._sps_pps = START + sps + START + pps
             w, h = struct.unpack_from("<ff", hdr, 56)
-            sw, sh = struct.unpack_from("<ff", hdr, 40)
-            log.info("codec config: video %dx%d (source %dx%d) option %02x", w, h, sw, sh, hdr[6])
             if hdr[6] in (0x56, 0x5E):
                 self.events("paused")
-            else:
+            elif all(math.isfinite(edge) and 1 <= edge <= MAX_VIDEO_EDGE for edge in (w, h)):
                 self.events("format", width=int(w), height=int(h))
         # 2 = heartbeat (old protocol), 5 = streaming report: nothing to do

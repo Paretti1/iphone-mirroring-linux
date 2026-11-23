@@ -14,7 +14,9 @@ from PySide6.QtCore import QObject, QProcess, QProcessEnvironment, QTimer, Qt, S
 from PySide6.QtNetwork import QAbstractSocket, QTcpSocket
 
 from .control import ERROR, OFF, READY, STARTING
-from .control.wireless import LOOPBACK, dependency_error, remote_args, vnc_password
+from .control.wireless import (
+    LOOPBACK, OLDER_IOS_MESSAGE, SESSION_PASSWORD_ENV, dependency_error, remote_args, vnc_password,
+)
 
 log = logging.getLogger(__name__)
 
@@ -220,6 +222,7 @@ class DesktopWireless(QObject):
         self._pending_output = b""
         self._last_output = ""
         self._last_error = ""
+        self._older_ios = False
         self._port = 0
         self._password = ""
         self._remote = []
@@ -285,13 +288,14 @@ class DesktopWireless(QObject):
         self._pending_output = b""
         self._last_output = ""
         self._last_error = ""
+        self._older_ios = False
         module = "iphone_mirror.wireless_backend" if self._phase == "serve" else "pymobiledevice3"
         environment = QProcessEnvironment.systemEnvironment()
         environment.insert("IPHONE_MIRROR_PREVIEW_EDGE", str(self.preview_edge))
         if self._phase == "serve":
-            environment.insert("IPHONE_MIRROR_SESSION_PASSWORD", self._password)
+            environment.insert(SESSION_PASSWORD_ENV, self._password)
         else:
-            environment.remove("IPHONE_MIRROR_SESSION_PASSWORD")
+            environment.remove(SESSION_PASSWORD_ENV)
         self.process.setProcessEnvironment(environment)
         # An older checkout in the launch folder must never replace the installed
         # backend. Isolated mode also ignores a stale PYTHONPATH and user site.
@@ -305,6 +309,10 @@ class DesktopWireless(QObject):
             line = raw.decode("utf-8", errors="replace").strip()
             if not line:
                 continue
+            if self._password:
+                line = line.replace(self._password, "[redacted]")
+            if "screen streaming needs ios " in line.lower():
+                self._older_ios = True
             log.info("Wireless viewer: %s", line)
             self._last_output = line
             if " ERROR " in f" {line} ":
@@ -334,6 +342,11 @@ class DesktopWireless(QObject):
             ])
         else:
             detail = self._last_error or self._pending_output.decode("utf-8", errors="replace").strip() or self._last_output
+            if self._password:
+                detail = detail.replace(self._password, "[redacted]")
+            if self._older_ios or "screen streaming needs ios " in detail.lower():
+                self._stop(ERROR, OLDER_IOS_MESSAGE)
+                return
             if "did not answer over remotepairing (bonjour)" in detail.lower():
                 detail = (
                     "The paired iPhone did not answer over Wi-Fi. Keep it awake and unlocked on the same network. "
@@ -391,6 +404,7 @@ class DesktopWireless(QObject):
         self.retry_timer.stop()
         self._cancel_scroll()
         self.client.close()
+        self._password = ""
         self._set_state(state, message)
         if self.process.state() != QProcess.NotRunning:
             self.process.terminate()

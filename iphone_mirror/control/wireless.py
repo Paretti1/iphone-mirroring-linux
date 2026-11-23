@@ -16,6 +16,12 @@ WEB_PORT = 8765
 VNC_PORT = 5901
 MIN_VERSION = (11, 61)
 LOOPBACK = "127.0.0.1"
+SESSION_PASSWORD_ENV = "IPHONE_MIRROR_SESSION_PASSWORD"
+OLDER_IOS_MESSAGE = (
+    "The direct Wi-Fi viewer requires iOS 27 or later. On the iPhone, open Control Center > "
+    "Screen Mirroring and select this computer for video and sound. For mouse and keyboard, "
+    "use a compatible signed WebDriverAgent over USB or an existing trusted endpoint."
+)
 
 log = logging.getLogger(__name__)
 
@@ -54,16 +60,17 @@ def run_tool(args):
     if error:
         print(error, file=sys.stderr)
         return 1
-    env = dict(os.environ, PYTHONUNBUFFERED="1")
+    env = dict(os.environ)
+    env.pop(SESSION_PASSWORD_ENV, None)
     args = list(args)
     module = "pymobiledevice3"
     if "--password" in args:
         index = args.index("--password")
-        env["IPHONE_MIRROR_SESSION_PASSWORD"] = args[index + 1]
+        env[SESSION_PASSWORD_ENV] = args[index + 1]
         del args[index:index + 2]
         module = "iphone_mirror.wireless_backend"
     try:
-        return subprocess.call([sys.executable, "-I", "-m", module, *args], env=env)
+        return subprocess.call([sys.executable, "-I", "-u", "-m", module, *args], env=env)
     except KeyboardInterrupt:
         return 130
     except OSError as e:

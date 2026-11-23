@@ -12,6 +12,7 @@ from importlib.metadata import version
 import av
 import numpy as np
 
+from iphone_mirror.control.wireless import SESSION_PASSWORD_ENV
 from iphone_mirror.realtime_hevc import MAX_DISPLAY_EDGE, RealtimeHevcDecoder
 from iphone_mirror.wireless_input import install_low_latency_input
 log = logging.getLogger(__name__)
@@ -200,9 +201,9 @@ def configure_backend():
 
 
 def main():
-    password = os.environ.pop("IPHONE_MIRROR_SESSION_PASSWORD", None)
-    if password is not None:
-        sys.argv.extend(("--password", password))
+    password = os.environ.pop(SESSION_PASSWORD_ENV, "")
+    if not password:
+        raise SystemExit("A private viewer password is required.")
     if os.environ.get("IPHONE_MIRROR_DIAGNOSTICS") == "1":
         print(
             f"WIRELESS_DIAG backend_boot version={version('iphone-mirroring-linux')} "
@@ -210,7 +211,11 @@ def main():
             flush=True,
         )
     configure_backend()
-    runpy.run_module("pymobiledevice3", run_name="__main__")
+    sys.argv.append(f"--password={password}")
+    try:
+        runpy.run_module("pymobiledevice3", run_name="__main__")
+    finally:
+        sys.argv.pop()
 
 
 if __name__ == "__main__":

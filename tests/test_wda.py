@@ -820,6 +820,12 @@ class CliTests(unittest.TestCase):
         self.assertNotIn("password", out)
         run.assert_called_once_with(["mounter", "auto-mount", "--remotepairing"])
 
+    def test_get_wda_selects_an_older_release(self):
+        with mock.patch.object(usb, "download_wda_ipa", return_value=Path("WDA.ipa")) as download:
+            code, out = self.run_cli("get-wda", "--version", "v16.12.8")
+        self.assertEqual(code, 0, out)
+        self.assertTrue(download.call_args.kwargs["url"].endswith("/download/v16.12.8/WebDriverAgentRunner-Runner.zip"))
+
     def test_start_runs_until_ctrl_c(self):
         import _thread
 

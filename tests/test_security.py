@@ -2,6 +2,7 @@
 import asyncio
 import io
 import os
+import plistlib
 import queue
 import stat
 import sys
@@ -19,13 +20,13 @@ import av
 import numpy as np
 from PySide6.QtWidgets import QApplication
 from iphone_mirror import net
-from iphone_mirror.airplay import Connection, Receiver, Request, MAX_CONNECTIONS
+from iphone_mirror.airplay import Connection, Receiver, Request, MAX_CONNECTIONS, MAX_CONNECTIONS_PER_PEER
 from iphone_mirror.config import Settings, private_log
 from iphone_mirror.control import usb
 from iphone_mirror.control.wda import WDA, WDAError
 from iphone_mirror.control import wireless
 from iphone_mirror.pairing import PairingSession, ServerIdentity
-from iphone_mirror.ui import PhoneWindow
+from iphone_mirror.ui import Bridge, PhoneWindow
 from iphone_mirror.video import VideoQueue
 
 
@@ -78,11 +79,24 @@ class NetworkSecurityTests(unittest.IsolatedAsyncioTestCase):
     async def test_connection_limit_and_phone_allowlist(self):
         writer = Mock()
         writer.get_extra_info.return_value = ("192.0.2.9", 123)
-        for tasks, allowed in ((set(range(MAX_CONNECTIONS)), None), (set(), "192.0.2.10")):
+        for tasks, allowed in (
+            (dict.fromkeys(range(MAX_CONNECTIONS), "192.0.2.8"), None),
+            ({}, "192.0.2.10"),
+            (dict.fromkeys(range(MAX_CONNECTIONS_PER_PEER), "192.0.2.9"), None),
+        ):
             receiver = SimpleNamespace(_connections=tasks)
             with patch.object(net, "ALLOWED_PHONE", allowed):
                 await Receiver._handle(receiver, None, writer)
-        self.assertEqual(writer.close.call_count, 2)
+        self.assertEqual(writer.close.call_count, 3)
+
+    async def test_invalid_setup_does_not_claim_the_receiver(self):
+        client = connection()
+        client.pairing.verified = True
+        body = plistlib.dumps({"streams": [{"type": 110}, {"type": 110}]})
+        response = await client._dispatch(Request("SETUP", "/stream", "RTSP/1.0", {}, body))
+        self.assertEqual(response.status, 400)
+        self.assertTrue(response.close)
+        self.assertIsNone(client.rx.session_owner)
 
 
 class SecurityTests(unittest.TestCase):
@@ -143,6 +157,10 @@ class SecurityTests(unittest.TestCase):
             link.symlink_to(path)
             with self.assertRaises(OSError):
                 private_log(link, "w")
+            hardlink = Path(tmp) / "hardlink"
+            os.link(path, hardlink)
+            with self.assertRaises(OSError):
+                private_log(hardlink, "w")
             self.assertEqual(path.read_text(), "oldnew")
             fifo = Path(tmp) / "fifo"
             os.mkfifo(fifo)
@@ -165,6 +183,16 @@ class SecurityTests(unittest.TestCase):
                     "http://127.0.0.1:8100/#secret"):
             with self.assertRaises(ValueError):
                 WDA(url)
+
+    def test_wda_rejects_invalid_session_metadata(self):
+        client = WDA("http://127.0.0.1:8100")
+        with patch.object(client, "_request", return_value={"sessionId": {"id": "not a string"}}):
+            with self.assertRaisesRegex(WDAError, "valid session id"):
+                client.new_session()
+        with patch.object(client, "_session", return_value={"value": {"width": float("inf"), "height": 390}}):
+            with self.assertRaisesRegex(WDAError, "screen size"):
+                client.window_size()
+        self.assertIsNone(client.size)
 
     def test_archive_bounds_and_atomic_output(self):
         archive = io.BytesIO()
@@ -202,6 +230,21 @@ class SecurityTests(unittest.TestCase):
                 usb.download_wda_ipa(dest, progress=lambda m: None)
             self.assertEqual(list(Path(tmp).iterdir()), [])
 
+    def test_archive_rejects_files_under_symlink(self):
+        archive = io.BytesIO()
+        with zipfile.ZipFile(archive, "w") as output:
+            link = zipfile.ZipInfo("WDA.app/framework")
+            link.create_system = 3
+            link.external_attr = (stat.S_IFLNK | 0o777) << 16
+            output.writestr(link, "bundled-framework")
+            output.writestr("WDA.app/framework/info", "file")
+        with tempfile.TemporaryDirectory() as tmp, patch.object(
+            usb.urllib.request, "urlopen", lambda *args, **kw: io.BytesIO(archive.getvalue())
+        ):
+            with self.assertRaisesRegex(usb.UsbError, "nested under a symlink"):
+                usb.download_wda_ipa(Path(tmp) / "out.ipa", progress=lambda message: None)
+            self.assertEqual(list(Path(tmp).iterdir()), [])
+
     def test_viewer_secret_is_not_in_os_process_arguments(self):
         with patch.object(wireless, "dependency_error", return_value=None), \
                 patch.object(wireless.subprocess, "call", return_value=0) as call:
@@ -215,6 +258,30 @@ class OlderIosModeTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])
+
+    def test_airplay_preview_keeps_only_the_newest_pending_frame(self):
+        frames = []
+        bridge = Bridge()
+        bridge.frame.connect(lambda *frame: frames.append(frame))
+        bridge.post_frame("old", 10, 20)
+        bridge.post_frame("new", 20, 40)
+        self.assertEqual(frames, [])
+        self.app.processEvents()
+        self.assertEqual(frames, [("new", 20, 40)])
+
+    def test_direct_viewer_version_failure_selects_airplay(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = Settings(Path(tmp) / "settings.json")
+            settings["wireless_auto_connect"] = True
+            window = PhoneWindow(settings, None)
+            try:
+                with patch.object(window, "_show_control_error"):
+                    window._on_wireless_state("error", wireless.OLDER_IOS_MESSAGE)
+                self.assertTrue(settings["legacy_mode"])
+                self.assertFalse(settings["wireless_auto_connect"])
+                self.assertEqual(window._wireless_button.text(), "AirPlay setup")
+            finally:
+                window.close()
 
     def test_legacy_mode_uses_wda_and_explains_airplay(self):
         with tempfile.TemporaryDirectory() as tmp:

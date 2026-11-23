@@ -11,6 +11,7 @@ import argparse
 import importlib
 import logging
 import queue
+import re
 import sys
 from pathlib import Path
 
@@ -176,10 +177,19 @@ def cmd_doctor(args):
 
 
 # ---------------------------------------------------------------------- setup helpers
+def wda_version(value):
+    if not re.fullmatch(r"v?[0-9]{1,4}\.[0-9]{1,4}\.[0-9]{1,4}", value):
+        raise argparse.ArgumentTypeError("expected a WebDriverAgent release version such as 16.12.8")
+    return value.removeprefix("v")
+
+
 def cmd_get_wda(args):
     dest = Path(args.out).expanduser() if args.out else None
     try:
-        path = usb.download_wda_ipa(dest, progress=lambda m: say(f"       {m}"))
+        url = usb.WDA_RELEASE_URL
+        if args.version:
+            url = url.replace("/latest/download/", f"/download/v{args.version}/")
+        path = usb.download_wda_ipa(dest, progress=lambda m: say(f"       {m}"), url=url)
     except usb.UsbError as e:
         fail("Could not build WebDriverAgentRunner.ipa", str(e))
         return 1
@@ -311,6 +321,8 @@ def build_parser():
 
     s = sub.add_parser("get-wda", help="download WebDriverAgent and build an .ipa for signing")
     s.add_argument("--out", metavar="PATH", help="where to save the .ipa (default: ~/Downloads/WebDriverAgentRunner.ipa)")
+    s.add_argument("--version", type=wda_version, metavar="VERSION",
+                   help="download a release matching your iOS version (default: latest)")
     s.set_defaults(func=cmd_get_wda)
 
     s = sub.add_parser("reveal-dev-mode", help="show the Developer Mode switch in the iPhone's Settings")
