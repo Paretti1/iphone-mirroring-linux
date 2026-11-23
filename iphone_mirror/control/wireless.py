@@ -4,6 +4,7 @@ import argparse
 import logging
 import os
 import secrets
+import string
 import subprocess
 import sys
 from importlib.metadata import PackageNotFoundError, version
@@ -17,6 +18,11 @@ MIN_VERSION = (11, 61)
 LOOPBACK = "127.0.0.1"
 
 log = logging.getLogger(__name__)
+
+
+def vnc_password():
+    # RFB truncates to eight 7-bit characters (about 48 bits with this alphabet).
+    return "".join(secrets.choice(string.ascii_letters + string.digits) for _ in range(8))
 
 
 def port_number(value):
@@ -49,8 +55,15 @@ def run_tool(args):
         print(error, file=sys.stderr)
         return 1
     env = dict(os.environ, PYTHONUNBUFFERED="1")
+    args = list(args)
+    module = "pymobiledevice3"
+    if "--password" in args:
+        index = args.index("--password")
+        env["IPHONE_MIRROR_SESSION_PASSWORD"] = args[index + 1]
+        del args[index:index + 2]
+        module = "iphone_mirror.wireless_backend"
     try:
-        return subprocess.call([sys.executable, "-m", "pymobiledevice3", *args], env=env)
+        return subprocess.call([sys.executable, "-I", "-m", module, *args], env=env)
     except KeyboardInterrupt:
         return 130
     except OSError as e:
@@ -74,7 +87,7 @@ def viewer(args):
     if result:
         return result
     # Upstream VNC Authentication uses the first eight characters.
-    password = secrets.token_hex(4 if args.vnc else 12)
+    password = vnc_password() if args.vnc else secrets.token_hex(12)
     options = ["developer", "core-device", "display"]
     if args.vnc:
         options += ["serve-vnc", "--port", str(port), "--decoder", "av"]

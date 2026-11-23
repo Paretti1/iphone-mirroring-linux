@@ -48,7 +48,7 @@ class RealtimeHevcDecoder:
         state = parse_sps(remove_emulation_prevention(sps[2:]))
         self.source_width = state.pic_width_in_luma_samples
         self.source_height = state.pic_height_in_luma_samples
-        if min(self.source_width, self.source_height) <= 0:
+        if min(self.source_width, self.source_height) <= 0 or self.source_width * self.source_height > 4096 * 4096:
             raise ValueError("Invalid HEVC display size")
         scale = min(1.0, preview_edge() / max(self.source_width, self.source_height))
         self.width = max(1, round(self.source_width * scale))
@@ -76,7 +76,7 @@ class RealtimeHevcDecoder:
         codec = av.CodecContext.create("hevc", "r")
         codec.thread_type = "SLICE"
         codec.thread_count = min(4, os.cpu_count() or 1)
-        codec.options = {"flags": "low_delay"}
+        codec.options = {"flags": "low_delay", "max_pixels": str(4096 * 4096)}
         with contextlib.suppress(av.error.FFmpegError):
             codec.decode(av.Packet(self._parameter_sets))
         return codec

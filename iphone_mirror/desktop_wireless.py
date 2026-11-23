@@ -2,7 +2,6 @@
 
 import logging
 import os
-import secrets
 import socket
 import struct
 import sys
@@ -15,7 +14,7 @@ from PySide6.QtCore import QObject, QProcess, QProcessEnvironment, QTimer, Qt, S
 from PySide6.QtNetwork import QAbstractSocket, QTcpSocket
 
 from .control import ERROR, OFF, READY, STARTING
-from .control.wireless import LOOPBACK, dependency_error, remote_args
+from .control.wireless import LOOPBACK, dependency_error, remote_args, vnc_password
 
 log = logging.getLogger(__name__)
 
@@ -273,7 +272,7 @@ class DesktopWireless(QObject):
         except OSError as exc:
             self._set_state(ERROR, f"Could not reserve a local viewer port. {exc}")
             return
-        self._password = secrets.token_hex(4)
+        self._password = vnc_password()
         self._remote = remote_args(device_id)
         self._phase = "mount"
         if os.environ.get("IPHONE_MIRROR_DIAGNOSTICS") == "1":
@@ -289,6 +288,10 @@ class DesktopWireless(QObject):
         module = "iphone_mirror.wireless_backend" if self._phase == "serve" else "pymobiledevice3"
         environment = QProcessEnvironment.systemEnvironment()
         environment.insert("IPHONE_MIRROR_PREVIEW_EDGE", str(self.preview_edge))
+        if self._phase == "serve":
+            environment.insert("IPHONE_MIRROR_SESSION_PASSWORD", self._password)
+        else:
+            environment.remove("IPHONE_MIRROR_SESSION_PASSWORD")
         self.process.setProcessEnvironment(environment)
         # An older checkout in the launch folder must never replace the installed
         # backend. Isolated mode also ignores a stale PYTHONPATH and user site.
@@ -327,7 +330,7 @@ class DesktopWireless(QObject):
             self._run([
                 "developer", "core-device", "display", "serve-vnc",
                 "--bind", LOOPBACK, "--port", str(self._port), "--decoder", "av",
-                "--password", self._password, *self._remote,
+                *self._remote,
             ])
         else:
             detail = self._last_error or self._pending_output.decode("utf-8", errors="replace").strip() or self._last_output

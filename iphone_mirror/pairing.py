@@ -45,9 +45,11 @@ class PairingSession:
 
     def pair_verify(self, data: bytes):
         """Returns response body (bytes) or b"" for the 2nd step; raises on error."""
+        self.verified = False
         if len(data) < 4:
             raise ValueError("invalid pair-verify data")
         if data[0] == 1:
+            self._key = self._iv = self.ecdh_secret = None
             if len(data) != 4 + 32 + 32:
                 raise ValueError("invalid pair-verify step 1")
             self._their_ecdh = data[4:36]

@@ -15,7 +15,7 @@ from PySide6.QtWidgets import QApplication
 
 from . import net
 from .airplay import Receiver
-from .config import APP_ID, APP_NAME, CONFIG_DIR, LOG_FILE, SETTINGS_FILE, Settings
+from .config import APP_ID, APP_NAME, CONFIG_DIR, LOG_FILE, SETTINGS_FILE, Settings, private_log
 from .control import OFF, Controller
 from .ui import Bridge, PhoneWindow, app_icon
 
@@ -24,10 +24,15 @@ LOCAL_PORT = 7100  # --local self-tests must not collide with a normal instance 
 LOCAL_SETTINGS = CONFIG_DIR / "settings-local.json"  # ... nor overwrite its settings
 
 
+class PrivateRotatingLog(RotatingFileHandler):
+    def _open(self):
+        return private_log(self.baseFilename, self.mode)
+
+
 def setup_logging():
     LOG_FILE.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     fmt = logging.Formatter("%(asctime)s %(levelname)-7s %(name)s: %(message)s")
-    fh = RotatingFileHandler(LOG_FILE, maxBytes=2_000_000, backupCount=2, encoding="utf-8")
+    fh = PrivateRotatingLog(LOG_FILE, maxBytes=2_000_000, backupCount=2, encoding="utf-8")
     fh.setFormatter(fmt)
     root = logging.getLogger()
     root.setLevel(logging.INFO)
@@ -56,7 +61,10 @@ def parse_args():
     )
     p.add_argument("--port", type=airplay_port, help=f"RTSP port (default {net.PORT}, or {LOCAL_PORT} with --local)")
     p.add_argument("--bind", type=IPv4Address, help="limit AirPlay to one local IPv4 address")
-    p.add_argument("--wireless", action="store_true", help="connect a paired iPhone over Wi-Fi at launch")
+    p.add_argument("--allow-phone", type=IPv4Address, help="only accept AirPlay from this iPhone IPv4 address")
+    mode = p.add_mutually_exclusive_group()
+    mode.add_argument("--wireless", action="store_true", help="connect a paired iPhone over Wi-Fi at launch (iOS 27+)")
+    mode.add_argument("--airplay", action="store_true", help="use AirPlay video/audio with optional WebDriverAgent input (older iOS)")
     p.add_argument("--diagnose", action="store_true", help="log wireless video stage counters every five seconds")
     p.add_argument("--device-id", help="select a previously paired iPhone for Wi-Fi control")
     p.add_argument("--control", action="store_true", help="start iPhone control (USB / WebDriverAgent) at launch")
@@ -78,6 +86,7 @@ def main():
         net.BIND_HOST = str(args.bind)
     if args.port:
         net.PORT = args.port
+    net.ALLOWED_PHONE = str(args.allow_phone) if args.allow_phone else None
     setup_logging()
     if args.diagnose:
         packages = []
@@ -125,6 +134,11 @@ def main():
             instance = None
 
     settings = Settings(LOCAL_SETTINGS if args.local else SETTINGS_FILE)
+    if args.airplay:
+        settings["legacy_mode"] = True
+        settings["wireless_auto_connect"] = False
+    elif args.wireless:
+        settings["legacy_mode"] = False
     logging.info(
         "starting, name=%r, port=%d, local=%s, pid=%d", settings["name"], net.PORT, args.local, os.getpid()
     )
@@ -156,7 +170,8 @@ def main():
     win.show()
     win._update_target()
     rx.start()
-    if args.wireless or (not args.local and not args.control and settings.get("wireless_auto_connect")):
+    if args.wireless or (not args.local and not args.control and not settings.get("legacy_mode")
+                         and settings.get("wireless_auto_connect")):
         QTimer.singleShot(0, win.connect_wireless)
     elif args.control:
         ctrl.start()

@@ -615,7 +615,7 @@ class UsbTests(unittest.TestCase):
         with mock.patch.object(usb.importlib.util, "find_spec", return_value=True), \
                 mock.patch.object(usb.subprocess, "Popen") as popen:
             usb._popen(["usbmux", "list"])
-        self.assertEqual(popen.call_args.args[0], [sys.executable, "-m", "pymobiledevice3", "usbmux", "list"])
+        self.assertEqual(popen.call_args.args[0], [sys.executable, "-I", "-m", "pymobiledevice3", "usbmux", "list"])
 
     def test_list_devices(self):
         with mock.patch.object(usb, "usbmuxd_reachable", return_value=False):
@@ -809,7 +809,7 @@ class CliTests(unittest.TestCase):
         self.assertEqual(second[:8], ["developer", "core-device", "display", "serve-vnc",
                                      "--port", "5901", "--decoder", "av"])
         self.assertEqual(second[8:11], ["--bind", "127.0.0.1", "--password"])
-        self.assertRegex(second[11], r"^[0-9a-f]{8}$")
+        self.assertRegex(second[11], r"^[A-Za-z0-9]{8}$")
         self.assertIn(second[11], out)
         self.assertEqual(second[12:], remote)
 

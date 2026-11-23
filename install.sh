@@ -42,7 +42,7 @@ fi
 venv_python="$app_home/venv/bin/python"
 
 cd -- "$source_dir"
-"$venv_python" -m pip install --upgrade ".$extras"
+"$venv_python" -m pip install --upgrade --upgrade-strategy eager ".$extras"
 QT_QPA_PLATFORM=offscreen "$venv_python" tools/install_desktop.py "$data_home"
 
 printf '\nInstalled iPhone Mirroring Linux. Open it from your application menu.\n'

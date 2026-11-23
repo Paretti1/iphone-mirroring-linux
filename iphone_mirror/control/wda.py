@@ -15,6 +15,7 @@ import threading
 import urllib.parse
 
 log = logging.getLogger(__name__)
+MAX_RESPONSE = 2 * 1024 * 1024
 
 INVALID_SESSION = "invalid session id"
 
@@ -62,6 +63,8 @@ class WDA:
         url = urllib.parse.urlsplit(self.base)
         if url.scheme != "http" or not url.hostname:
             raise ValueError(f"not an http:// URL: {base_url!r}")
+        if url.username or url.password or url.query or url.fragment:
+            raise ValueError("WebDriverAgent URL must not contain credentials, query, or fragment")
         self._host = url.hostname
         self._port = url.port or 80
         self._prefix = url.path.rstrip("/")
@@ -102,7 +105,12 @@ class WDA:
                 try:
                     conn.request(method, self._prefix + path, body=data, headers=headers)
                     resp = conn.getresponse()
-                    return resp.status, resp.read()
+                    raw = resp.read(MAX_RESPONSE + 1)
+                    if len(raw) > MAX_RESPONSE:
+                        conn.close()
+                        self._conn = None
+                        raise WDAError("WebDriverAgent response exceeds the size limit")
+                    return resp.status, raw
                 except (http.client.HTTPException, OSError) as e:
                     conn.close()
                     self._conn = None

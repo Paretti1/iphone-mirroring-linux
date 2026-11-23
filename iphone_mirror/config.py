@@ -4,6 +4,7 @@ import logging
 import os
 import secrets
 import socket
+import stat
 import subprocess
 import tempfile
 from pathlib import Path
@@ -52,10 +53,28 @@ DEFAULTS = {
     "window_width": 0,
     "window_height": 0,
     "wireless_preview_edge": 1080,
+    "legacy_mode": False,
     # identity, generated on first start
     "mac": "",
     "ed25519_seed": "",
 }
+
+
+def private_log(path, mode="a"):
+    """Open a user-only log without following a pre-existing symlink."""
+    path = Path(path)
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK
+    flags |= os.O_TRUNC if mode == "w" else os.O_APPEND
+    fd = os.open(path, flags, 0o600)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise OSError("log path must be a regular file")
+        os.fchmod(fd, 0o600)
+        return os.fdopen(fd, mode, encoding="utf-8", errors="replace")
+    except BaseException:
+        os.close(fd)
+        raise
 
 
 class Settings:

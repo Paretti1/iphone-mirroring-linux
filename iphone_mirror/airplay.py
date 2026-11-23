@@ -2,6 +2,7 @@
 import asyncio
 import hashlib
 import logging
+import math
 import plistlib
 import struct
 import threading
@@ -19,6 +20,9 @@ log = logging.getLogger(__name__)
 SERVER = f"AirTunes/{discovery.SRCVERS}"
 NTP_EPOCH = 2208988800
 MAX_RTSP_BODY = 1024 * 1024
+MAX_RTSP_HEADER = 16 * 1024
+MAX_CONNECTIONS = 8
+HANDSHAKE_TIMEOUT = 10
 
 
 def _bplist(obj) -> bytes:
@@ -107,14 +111,15 @@ class Connection:
         log.info("connection from %s", self.remote_ip)
         try:
             while True:
-                req = await self._read_request()
+                timeout = None if self.rx.session_owner is self else HANDSHAKE_TIMEOUT
+                req = await asyncio.wait_for(self._read_request(), timeout)
                 if req is None:
                     break
                 resp = await self._dispatch(req)
                 await self._write(req, resp)
                 if resp.close:
                     break
-        except (asyncio.IncompleteReadError, asyncio.LimitOverrunError, ConnectionError, ValueError):
+        except (asyncio.IncompleteReadError, asyncio.LimitOverrunError, ConnectionError, ValueError, TimeoutError):
             pass
         except Exception:
             log.exception("connection error")
@@ -132,18 +137,34 @@ class Connection:
             return None
         lines = head.decode("utf-8", "replace").split("\r\n")
         parts = lines[0].split(" ")
-        if len(parts) < 3:
-            return None
+        if len(head) > MAX_RTSP_HEADER or len(parts) != 3:
+            raise ValueError("invalid RTSP header")
         method, url, protocol = parts[0], parts[1], parts[2]
+        if (protocol not in ("RTSP/1.0", "HTTP/1.0", "HTTP/1.1") or not method
+                or len(method) > 32 or not all("A" <= c <= "Z" or c == "_" for c in method)):
+            raise ValueError("invalid RTSP request line")
+        if len(url) > 2048 or any(ord(c) < 32 or ord(c) == 127 for c in url):
+            raise ValueError("invalid RTSP URL")
         headers = {}
         for line in lines[1:]:
-            if ":" in line:
-                k, v = line.split(":", 1)
-                headers[k.strip().lower()] = v.strip()
+            if any(ord(c) < 32 and c != "\t" or ord(c) == 127 for c in line):
+                raise ValueError("invalid RTSP header character")
+            if not line:
+                continue
+            if ":" not in line:
+                raise ValueError("invalid RTSP header")
+            k, v = line.split(":", 1)
+            if not k or any(not (c.isascii() and (c.isalnum() or c == "-")) for c in k):
+                raise ValueError("invalid RTSP header name")
+            if k.lower() in headers:
+                raise ValueError("duplicate RTSP header")
+            headers[k.lower()] = v.strip()
+        if "transfer-encoding" in headers:
+            raise ValueError("RTSP transfer encoding is not supported")
         n = int(headers.get("content-length", "0") or 0)
         if not 0 <= n <= MAX_RTSP_BODY:
             raise ValueError("invalid RTSP request body length")
-        body = await self.reader.readexactly(n) if n else b""
+        body = await asyncio.wait_for(self.reader.readexactly(n), HANDSHAKE_TIMEOUT) if n else b""
         return Request(method, url, protocol, headers, body)
 
     async def _write(self, req: Request, resp: Response):
@@ -165,6 +186,12 @@ class Connection:
         else:
             log.info("%s %s (%d bytes)", req.method, req.url, len(req.body))
         resp = Response()
+        public = req.method == "OPTIONS" or (req.method == "GET" and path == "/info") or (
+            req.method == "POST" and path in ("/info", "/pair-setup", "/pair-verify")
+        )
+        if not public and not self.pairing.verified:
+            resp.status, resp.reason, resp.close = 403, "Forbidden", True
+            return resp
         try:
             if req.method == "GET" and path == "/info":
                 self.on_info(req, resp)
@@ -415,7 +442,9 @@ class Receiver:
         return self.player
 
     def set_volume(self, db: float):
-        self.volume_db = db
+        if not math.isfinite(db):
+            return
+        self.volume_db = max(-144.0, min(0.0, db))
         self._apply_volume()
 
     def set_muted(self, muted: bool):
@@ -459,6 +488,12 @@ class Receiver:
         return await asyncio.get_running_loop().run_in_executor(self._executor, function, *args)
 
     async def _handle(self, reader, writer):
+        peer = writer.get_extra_info("peername")
+        if len(self._connections) >= MAX_CONNECTIONS or (
+            net.ALLOWED_PHONE is not None and (not peer or peer[0] != net.ALLOWED_PHONE)
+        ):
+            writer.close()
+            return
         task = asyncio.current_task()
         self._connections.add(task)
         try:
@@ -470,7 +505,8 @@ class Receiver:
         self.loop = asyncio.get_running_loop()
         self._stopping = asyncio.Event()
         try:
-            self._server = await asyncio.start_server(self._handle, host=net.BIND_HOST, port=net.PORT)
+            self._server = await asyncio.start_server(self._handle, host=net.BIND_HOST, port=net.PORT,
+                                                      limit=MAX_RTSP_HEADER)
             self.port = self._server.sockets[0].getsockname()[1]
             log.info("RTSP server listening on port %d", self.port)
             if net.ADVERTISE:

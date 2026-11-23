@@ -16,6 +16,28 @@ from . import net
 log = logging.getLogger(__name__)
 
 START = b"\x00\x00\x00\x01"
+MAX_DECODE_PIXELS = 4096 * 4096
+
+
+class VideoQueue(queue.Queue):
+    """Bound compressed frames by bytes as well as packet count."""
+
+    def __init__(self, max_bytes=32 * 1024 * 1024):
+        super().__init__(maxsize=32)
+        self.max_bytes = max_bytes
+        self.buffered_bytes = 0
+
+    def _put(self, item):
+        size = len(item) if item is not None else 0
+        if self.buffered_bytes + size > self.max_bytes:
+            raise queue.Full
+        super()._put(item)
+        self.buffered_bytes += size
+
+    def _get(self):
+        item = super()._get()
+        self.buffered_bytes -= len(item) if item is not None else 0
+        return item
 
 
 def mirror_cipher(aeskey: bytes, stream_connection_id: int):
@@ -49,7 +71,7 @@ class VideoDecoder(threading.Thread):
     def __init__(self, on_frame):
         super().__init__(name="video-decoder", daemon=True)
         self.on_frame = on_frame
-        self.q = queue.Queue(maxsize=240)
+        self.q = VideoQueue()
         self.target = None  # (w, h) in device pixels, set by the UI
         self.last_frame = None  # full-resolution av.VideoFrame (for screenshots)
         self._codec = None
@@ -74,7 +96,7 @@ class VideoDecoder(threading.Thread):
             c.thread_type = "SLICE"  # no frame-threading delay
         except Exception:
             pass
-        c.options = {"flags": "low_delay"}
+        c.options = {"flags": "low_delay", "max_pixels": str(MAX_DECODE_PIXELS)}
         return c
 
     def run(self):

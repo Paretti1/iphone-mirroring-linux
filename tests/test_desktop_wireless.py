@@ -381,7 +381,7 @@ class DesktopWirelessTest(unittest.TestCase):
                     self.assertIn("iphone_mirror.wireless_backend", args)
                     original_start(sys.executable, [
                         "-u", "-c", HEVC_VIEWER, args[args.index("--port") + 1],
-                        args[args.index("--password") + 1], str(events), str(Path(__file__).parent),
+                        backend._password, str(events), str(Path(__file__).parent),
                     ])
 
             window.show()
@@ -469,7 +469,7 @@ class DesktopWirelessTest(unittest.TestCase):
                     launch(
                         sys.executable,
                         ["-u", "-c", SIMULATED_VIEWER, args[args.index("--port") + 1],
-                         args[args.index("--password") + 1], str(events)],
+                         bridge._password, str(events)],
                     )
 
             window.show()

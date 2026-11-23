@@ -4,20 +4,20 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "iphone-mirroring-linux"
-version = "0.2.9"
+version = "0.3.0"
 description = "AirPlay screen mirroring and optional iPhone control for Linux"
 readme = "README.md"
 requires-python = ">=3.11"
 license = "GPL-3.0-only"
 license-files = ["LICENSE", "licenses/*.md"]
 dependencies = [
-    "av>=14,<20",
-    "cryptography>=43",
+    "av>=19.0.2,<20",
+    "cryptography>=50.0.2",
     "ifaddr>=0.2",
     "numpy>=1.26",
-    "PySide6-Essentials>=6.8,<7",
+    "PySide6-Essentials>=6.12,<7",
     "sounddevice>=0.5,<0.6",
-    "zeroconf>=0.130",
+    "zeroconf>=0.154",
 ]
 
 [project.optional-dependencies]

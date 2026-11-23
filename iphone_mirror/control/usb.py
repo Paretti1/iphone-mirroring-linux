@@ -14,22 +14,28 @@ import json
 import logging
 import os
 import socket
+import stat
 import subprocess
 import sys
 import threading
 import time
+import tempfile
 import urllib.error
 import urllib.request
 import zipfile
 from pathlib import Path
 
-from ..config import APP_DIR, downloads_dir
+from ..config import APP_DIR, downloads_dir, private_log
 from .wda import WDA, WDAError, describe_error
 
 log = logging.getLogger(__name__)
 
 WDA_PORT = 8100
 WDA_RELEASE_URL = "https://github.com/appium/WebDriverAgent/releases/latest/download/WebDriverAgentRunner-Runner.zip"
+MAX_DOWNLOAD = 128 * 1024 * 1024
+MAX_ARCHIVE_BYTES = 512 * 1024 * 1024
+MAX_MEMBER_BYTES = 64 * 1024 * 1024
+MAX_ARCHIVE_MEMBERS = 20000
 
 MSG_NO_USBMUXD = (
     "The system usbmuxd service is unavailable.\n"
@@ -109,7 +115,7 @@ def _popen(args, **kw):
     if importlib.util.find_spec("pymobiledevice3") is None:
         raise UsbError(MSG_NO_PMD3)
     return subprocess.Popen(
-        [sys.executable, "-m", "pymobiledevice3", *args],
+        [sys.executable, "-I", "-m", "pymobiledevice3", *args],
         stdin=subprocess.DEVNULL, env=_child_env(), **kw,
     )
 
@@ -386,7 +392,7 @@ class UsbSession:
             if self._closed.is_set():
                 raise Cancelled()
             APP_DIR.mkdir(parents=True, exist_ok=True)
-            logf = open(self.log_path(name), "w", encoding="utf-8", errors="replace")
+            logf = private_log(self.log_path(name), "w")
             logf.write("pymobiledevice3 " + " ".join(args) + "\n")
             logf.flush()
             log.info("spawn %s: %s", name, " ".join(args))
@@ -439,6 +445,8 @@ def _ipa_member(name):
         name.endswith("/")
         or name.startswith(("/", "__MACOSX/"))
         or ".." in parts
+        or "\\" in name
+        or any(":" in p for p in parts)
         or parts[-1].startswith("._")
         or parts[-1] == ".DS_Store"
     )
@@ -452,7 +460,9 @@ def download_wda_ipa(dest: Path = None, progress=print, url: str = WDA_RELEASE_U
     req = urllib.request.Request(url, headers={"User-Agent": "iphone-mirror"})
     try:
         with urllib.request.urlopen(req, timeout=120) as r:
-            data = r.read()
+            data = r.read(MAX_DOWNLOAD + 1)
+            if len(data) > MAX_DOWNLOAD:
+                raise UsbError("WebDriverAgent download exceeds the size limit")
     except urllib.error.HTTPError as e:
         raise UsbError(f"Download failed: HTTP {e.code}") from None
     except urllib.error.URLError as e:
@@ -466,6 +476,11 @@ def download_wda_ipa(dest: Path = None, progress=print, url: str = WDA_RELEASE_U
     except zipfile.BadZipFile:
         raise UsbError("The download is not a zip archive") from None
     with src:
+        entries = src.infolist()
+        if (len(entries) > MAX_ARCHIVE_MEMBERS
+                or sum(i.file_size for i in entries) > MAX_ARCHIVE_BYTES
+                or any(i.file_size > MAX_MEMBER_BYTES for i in entries)):
+            raise UsbError("WebDriverAgent archive exceeds the size limit")
         names = [n for n in src.namelist() if _ipa_member(n)]
         roots = sorted({n[: n.find(".app/") + 5] for n in names if ".app/" in n}, key=len)
         if not roots:
@@ -473,18 +488,33 @@ def download_wda_ipa(dest: Path = None, progress=print, url: str = WDA_RELEASE_U
         app_root = roots[0]  # outermost bundle, e.g. "WebDriverAgentRunner-Runner.app/"
         prefix = app_root[: app_root.rstrip("/").rfind("/") + 1]  # folder containing the .app
         dest.parent.mkdir(parents=True, exist_ok=True)
-        tmp = dest.with_name(dest.name + ".part")
+        # A random, exclusive file prevents a pre-planted .part symlink from
+        # redirecting this write. Replace the destination only on success.
+        fd, temporary = tempfile.mkstemp(dir=dest.parent, prefix=".wda-")
+        tmp = Path(temporary)
         try:
-            with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as ipa:
+            with os.fdopen(fd, "w+b") as file, zipfile.ZipFile(file, "w", zipfile.ZIP_DEFLATED) as ipa:
                 for n in names:
                     if not n.startswith(app_root):
                         continue
                     info = src.getinfo(n)
+                    content = src.read(n)
+                    if stat.S_ISLNK(info.external_attr >> 16):
+                        # Framework links may be relative, but may not escape
+                        # the app bundle when the signing tool unpacks it.
+                        target = content.decode("utf-8")
+                        if target.startswith("/") or "\\" in target or ":" in target:
+                            raise UsbError("Unsafe symlink in WebDriverAgent archive")
+                        depth = len(n[len(app_root):].split("/")) - 1
+                        for part in target.split("/"):
+                            depth += -1 if part == ".." else int(part not in ("", "."))
+                            if depth < 0:
+                                raise UsbError("Unsafe symlink in WebDriverAgent archive")
                     zi = zipfile.ZipInfo("Payload/" + n[len(prefix):], info.date_time)
                     zi.create_system = info.create_system  # keep unix modes (executables, symlinks)
                     zi.external_attr = info.external_attr
                     zi.compress_type = zipfile.ZIP_DEFLATED
-                    ipa.writestr(zi, src.read(n))
+                    ipa.writestr(zi, content)
             os.replace(tmp, dest)
         except BaseException:
             tmp.unlink(missing_ok=True)

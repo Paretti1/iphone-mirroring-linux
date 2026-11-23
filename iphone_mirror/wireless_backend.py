@@ -200,6 +200,9 @@ def configure_backend():
 
 
 def main():
+    password = os.environ.pop("IPHONE_MIRROR_SESSION_PASSWORD", None)
+    if password is not None:
+        sys.argv.extend(("--password", password))
     if os.environ.get("IPHONE_MIRROR_DIAGNOSTICS") == "1":
         print(
             f"WIRELESS_DIAG backend_boot version={version('iphone-mirroring-linux')} "

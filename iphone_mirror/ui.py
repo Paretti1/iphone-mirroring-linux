@@ -430,6 +430,7 @@ class PhoneWindow(QWidget):
         self.update()
 
     def _update_wireless_button(self):
+        self._wireless_button.setText("AirPlay setup" if self.settings.get("legacy_mode") else "Connect over Wi-Fi")
         rect = self.phone_rect()
         width = min(190, int(rect.width() - 18))
         height = self._wireless_button.minimumHeight()
@@ -441,6 +442,18 @@ class PhoneWindow(QWidget):
         )
 
     def connect_wireless(self):
+        if self.settings.get("legacy_mode"):
+            QMessageBox.information(
+                self, "AirPlay for older iOS",
+                'Connect both devices to the same trusted network. On the unlocked iPhone, open '
+                f'Control Center → Screen Mirroring and choose "{self.settings["name"]}".\n\n'
+                'Video and sound use AirPlay. For mouse and keyboard, install a compatible signed '
+                'WebDriverAgent runner and choose Control iPhone (WebDriverAgent) in the right-click menu. '
+                'USB setup is documented in README. Wi-Fi input requires an already running, explicitly '
+                'selected WDA endpoint (--wda-url http://PHONE_IP:8100).\n\n'
+                'The direct developer Wi-Fi stream requires iOS 27 or later.'
+            )
+            return
         if self.wireless.active:
             return
         if self.state in ("connecting", "mirroring", "paused"):
@@ -454,6 +467,15 @@ class PhoneWindow(QWidget):
         self.settings["wireless_auto_connect"] = False
         self.settings.save()
         self.wireless.stop()
+
+    def _set_legacy_mode(self, enabled):
+        if enabled and self.wireless.active:
+            self.disconnect_wireless()
+        self.settings["legacy_mode"] = bool(enabled)
+        if enabled:
+            self.settings["wireless_auto_connect"] = False
+        self.settings.save()
+        self._update_wireless_button()
 
     def _on_wireless_state(self, state, message):
         self.wireless_message = message
@@ -805,8 +827,14 @@ class PhoneWindow(QWidget):
     def _toggle_control(self):
         if self.wireless.active:
             self.disconnect_wireless()
-        elif self.state not in ("mirroring", "paused", "connecting"):
+        elif not self.settings.get("legacy_mode") and self.state not in ("mirroring", "paused", "connecting"):
             self.connect_wireless()
+        else:
+            self._toggle_wda_control()
+
+    def _toggle_wda_control(self):
+        if self.wireless.active:
+            self._hint("Disconnect the developer Wi-Fi viewer before starting WebDriverAgent")
         elif self.ctrl is None:
             self._hint("iPhone control is not available")
         elif self.ctrl.active:  # the controller's own state: the shown one may lag behind
@@ -1148,15 +1176,19 @@ class PhoneWindow(QWidget):
         self._cancel_gesture()
         m = QMenu(self)
         ready = self._control_ready()
+        legacy = QAction("Use AirPlay (older iOS)", m, checkable=True,
+                         checked=bool(self.settings.get("legacy_mode")))
+        legacy.triggered.connect(self._set_legacy_mode)
+        m.addAction(legacy)
         if self.wireless.active:
             m.addAction("Disconnect Wi-Fi", self.disconnect_wireless)
         else:
-            m.addAction("Connect over Wi-Fi", self.connect_wireless)
+            m.addAction("AirPlay setup" if self.settings.get("legacy_mode") else "Connect over Wi-Fi (iOS 27+)", self.connect_wireless)
         ctl = QAction(
-            "Control iPhone (USB)\tCtrl+U", m, checkable=True, checked=self.control_state in (STARTING, READY)
+            "Control iPhone (WebDriverAgent)\tCtrl+U", m, checkable=True, checked=self.control_state in (STARTING, READY)
         )
         ctl.setEnabled(self.ctrl is not None and not self.wireless.active)
-        ctl.triggered.connect(self._toggle_control)
+        ctl.triggered.connect(self._toggle_wda_control)
         m.addAction(ctl)
         for label, method, args in (
             ("Home\tCtrl+H", "home", ()),

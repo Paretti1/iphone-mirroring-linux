@@ -2,11 +2,40 @@
 
 Mirror your iPhone in a compact desktop window on Fedora and other Linux distributions. Standard AirPlay brings the screen and sound over Wi-Fi. Optional control lets you click, swipe, scroll, and type from your computer.
 
+Version 0.3.0 adds a remembered AirPlay mode for older iOS and security hardening.
+See the [security review and limits](SECURITY.md) for the findings and test evidence.
+
 | Mode | Video and audio | Mouse and keyboard |
 | --- | --- | --- |
 | AirPlay | Wi-Fi from Control Center, with sound | Optional USB control through a signed WebDriverAgent runner |
 | AirPlay with an existing WebDriverAgent | Wi-Fi from Control Center, with sound | Wi-Fi while your explicitly selected WebDriverAgent is running |
 | Developer Wi-Fi viewer | Direct Wi-Fi in the desktop app | Direct Wi-Fi with iOS 27+, Developer Mode, and one-time pairing |
+
+## Older iOS versions
+
+Start `iphone-mirroring-linux --airplay`, or right-click the window and enable
+**Use AirPlay (older iOS)**. This choice is remembered and disables automatic
+attempts to start the iOS 27 developer viewer. Click **AirPlay setup** for instructions.
+On the unlocked iPhone, open **Control Center → Screen Mirroring** and select the
+computer. AirPlay video/audio do not require Developer Mode or iOS 27.
+
+Mouse/keyboard input uses a separate, compatible signed WebDriverAgent runner:
+
+```bash
+# USB input after installing and provisioning a compatible WDA runner:
+iphone-mirroring-linux --airplay --control
+
+# Wireless input only when your trusted WDA runner is already active/reachable:
+iphone-mirroring-linux --airplay --control --wda-url http://PHONE_IP:8100
+```
+
+See [USB/WDA setup](#usb-control-and-existing-wi-fi-webdriveragent) below. Runner
+compatibility depends on the iOS and Xcode/WDA versions used to build it; downloading
+the latest unsigned IPA alone does not make it usable on every older iPhone.
+No physical older-iOS device has been validated for this release. AirPlay on Linux
+does not provide Apple's locked-screen mirroring, and this project cannot backport
+the developer display stream: [upstream requires iOS 27+](https://doronz88.github.io/pymobiledevice3/master/guides/screen-mirroring/).
+Use `--wireless` to switch back to developer Wi-Fi mode on a compatible phone.
 
 The desktop AirPlay window includes rotation, a floating pin, draggable resize edges and corners, remembered geometry where the desktop supports it, screenshots, mute, and a single running instance. The phone image stays in proportion inside the resized window. Its design follows the upstream project's compact phone-shaped window. The separate developer Wi-Fi viewer uses iOS's developer display and input services. Apple’s [macOS iPhone Mirroring](https://support.apple.com/en-us/120421) uses its own Apple Account integration. AirPlay on Linux requires you to start Screen Mirroring on the iPhone, and pauses when the iPhone locks.
 
@@ -69,7 +98,14 @@ Use `./install.sh` for AirPlay mirroring alone. `--control` and `--usb` both ins
 3. On the unlocked iPhone, open **Control Center → Screen Mirroring** and choose the name displayed in the desktop window.
 4. To disconnect, select **Stop Mirroring** on the iPhone.
 
-The app opens an AirPlay receiver on the LAN. Use a trusted network or restrict it to one interface with `iphone-mirroring-linux --bind PC_IPV4_ADDRESS`. If VPNs, guest Wi-Fi, or client isolation block discovery, connect both devices to the same local network where they can reach each other.
+The app opens an AirPlay receiver on the LAN. Use a trusted network. Restrict it to
+one interface and the phone's current IPv4 address with
+`iphone-mirroring-linux --bind PC_IPV4_ADDRESS --allow-phone PHONE_IPV4_ADDRESS`.
+The legacy AirPlay handshake verifies a sender's supplied key; it does **not** ask
+you to approve or remember trusted senders. An IP restriction is also not a
+cryptographic identity check. See [SECURITY.md](SECURITY.md) for boundaries and
+remaining risks. If VPNs, guest Wi-Fi, or client isolation block discovery,
+connect both devices to a local network where they can reach each other.
 
 ### Fedora firewall
 
@@ -144,7 +180,7 @@ This is the alternate input path for the AirPlay desktop window. Screen and audi
 For a WDA instance you already started by a trusted means, explicitly target its endpoint. This mode works without a cable during use if the WDA runner stays active after you unplug it. WDA endpoints can accept unauthenticated input, so keep them on a private network.
 
 ```bash
-iphone-mirroring-linux --wda-url http://IPHONE_IPV4_ADDRESS:8100 --control
+iphone-mirroring-linux --airplay --wda-url http://IPHONE_IPV4_ADDRESS:8100 --control
 ```
 
 A USB-started XCTest runner usually ends when the underlying test connection closes. On older iOS versions, this project does not start a cable-free control session unless an active WDA endpoint is supplied. A free signing profile may expire and need renewal.
@@ -320,6 +356,7 @@ python tests/test_desktop_wireless.py
 python tests/test_wireless_video.py
 python tests/test_wireless_input.py
 python tests/test_airplay_lifecycle.py
+python tests/test_security.py
 python tools/smoke_test.py
 ```
 
